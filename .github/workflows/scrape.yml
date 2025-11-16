@@ -1,7 +1,6 @@
 name: Scrape
 
 on:
-  push:
   workflow_dispatch:
   schedule:
   # Daily at 22:22 GMT
