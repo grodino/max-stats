@@ -20,3 +20,6 @@ Vous en faites ce que vous voulez.
 - [ ] Convertir les anciennes données en format parquet
 - [ ] Retirer les artefacts de scrapy dans les anciennes données (colonnes "_key" et "_type")
 - [ ] Ajouter les anciennes données dans le dépot
+- [ ] Ajouter un calcul de différences avec le jour précédent dans `download-maxjeune` pour que la CI échoue si on retélécharge les mêmes donnée
+- [ ] Automatiquement mettre à jour le readme avec le nombre de jours scrapés et le nombre de jours maquant
+- [ ] Automatiquement mettre à jour le readme avec un graphe qui indique le nombre de trajets disponibles dans les 30 prochains jours pour chaque jour de requête (si facile, sous forme de carte animée ?).
