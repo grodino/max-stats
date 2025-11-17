@@ -1,8 +1,10 @@
+import re
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import typer
 import polars as pl
+import altair as alt
 
 MAXJEUNE_DATA_URL = "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/tgvmax/exports/csv"
 DATA_FOLDER = Path("data")
@@ -11,15 +13,11 @@ SCHEMA = {"date": pl.Date, "request_date": pl.Datetime}
 app = typer.Typer()
 
 
-def scan_csv():
+def scan_files():
     """Read and parse all Max Jeune CSV files."""
-    return pl.scan_csv(
-        DATA_FOLDER / "maxjeune" / "*.csv",
-        schema_overrides=SCHEMA,
-        include_file_paths="file_path",
+    return pl.scan_parquet(
+        DATA_FOLDER / "maxjeune" / "*.pq", include_file_paths="file_path"
     ).with_columns(
-        pl.col("heure_depart").str.to_time("%H:%M"),
-        pl.col("heure_arrivee").str.to_time("%H:%M"),
         has_seat=pl.col("od_happy_card") == "OUI",
         days_to_trip=(pl.col("date") - pl.col("request_date")).dt.total_days(),
     )
@@ -70,14 +68,14 @@ def download_maxjeune():
 def has_missing_requests():
     """Find requests that are missing in the downloaded data."""
     requests = (
-        scan_csv()
+        scan_files()
         .select("file_path", "request_date")
         .unique(("file_path", "request_date"))
         .sort("request_date")
         .collect()
     )
 
-    time_diffs = (
+    n_missing_days = (
         requests.select(diff=pl.col("request_date").dt.date().diff().drop_nulls())
         .filter(pl.col("diff").dt.total_days() > 1)
         .count()
@@ -88,10 +86,73 @@ def has_missing_requests():
     last_day = requests.select(pl.col("request_date").dt.date().max()).item()
 
     print(
-        f"Total of {n_requested_days} days of data with {time_diffs} request missing between {first_day} and {last_day}"
+        f"Total of {n_requested_days} days of data with {n_missing_days} request missing between {first_day} and {last_day}"
     )
-    print(f"Found {time_diffs} request days missing")
-    return time_diffs
+    print(f"Found {n_missing_days} request days missing")
+
+    return {
+        "n_requested_days": n_requested_days,
+        "n_missing_days": n_missing_days,
+        "requests_start": first_day,
+        "requests_end": last_day,
+    }
+
+
+@app.command()
+def update_readme():
+    """Plot the number of available trips at each request date and update the
+    readme with the total number of request days and missing days"""
+
+    n_available_trips = (
+        scan_files()
+        .group_by("request_date")
+        .agg(
+            disponible=(pl.col("has_seat") == True).sum(),
+            total=pl.col("has_seat").len(),
+        )
+        .collect()
+        .unpivot(on=["disponible", "total"], index="request_date")
+    )
+
+    alt.renderers.enable("browser")
+    plot = (
+        alt.Chart(
+            n_available_trips,
+            width=400,
+            height=200,
+            title="Historique du nombre de trajets MAXJEUNE et au total, disponibles chaque jour",
+        )
+        .mark_line()
+        .encode(
+            x=alt.X(
+                "request_date",
+                title="Date de la recherche",
+                axis=alt.Axis(format="%B %Y"),
+            ),
+            y=alt.Y("value", title="Nombre de trajets"),
+            color=alt.Color("variable").legend(title=None),
+        )
+        .configure_legend(orient="top")
+        .configure_axisX(labelAngle=45)
+    )
+    plot.save("assets/n_available_trips.svg")
+
+    readme_str = Path("README.md").read_text()
+
+    for variable, value in has_missing_requests().items():
+        to_replace = re.search(rf'<span id="{variable}">[^<]*<\/span>', readme_str)[0]
+
+        if isinstance(value, datetime):
+            value = value.strftime("%Y/%m/%d")
+        else:
+            value = str(value)
+
+        # Add the html around it
+        value = f'<span id="{variable}">{value}</span>'
+
+        readme_str = readme_str.replace(to_replace, value)
+
+    Path("README.md").write_text(readme_str)
 
 
 if __name__ == "__main__":
