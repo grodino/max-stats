@@ -19,6 +19,8 @@ jobs:
       uses: astral-sh/setup-uv@v6
     - name: Run the scraper
       run: uv run main.py download-maxjeune
+    - name: Update readme
+      run: uv run main.py update-readme
     - name: Commit and push
       run: |-
         git config user.name "Automated"
