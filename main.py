@@ -7,6 +7,7 @@ import polars as pl
 import altair as alt
 
 MAXJEUNE_DATA_URL = "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/tgvmax/exports/csv"
+STATIONS_DATA_URL = "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/gares-de-voyageurs/exports/csv"
 DATA_FOLDER = Path("data")
 SCHEMA = {"date": pl.Date, "request_date": pl.Datetime}
 
@@ -21,6 +22,34 @@ def scan_files():
         has_seat=pl.col("od_happy_card") == "OUI",
         days_to_trip=(pl.col("date") - pl.col("request_date")).dt.total_days(),
     )
+
+
+def has_missing_requests():
+    """Find requests that are missing in the downloaded data."""
+    requests = (
+        scan_files()
+        .select("file_path", "request_date")
+        .unique(("file_path", "request_date"))
+        .sort("request_date")
+        .collect()
+    )
+
+    n_missing_days = (
+        requests.select(diff=pl.col("request_date").dt.date().diff().drop_nulls())
+        .filter(pl.col("diff").dt.total_days() > 1)
+        .count()
+        .item()
+    )
+    n_requested_days = requests.n_unique(pl.col("request_date").dt.date())
+    first_day = requests.select(pl.col("request_date").dt.date().min()).item()
+    last_day = requests.select(pl.col("request_date").dt.date().max()).item()
+
+    return {
+        "n_requested_days": n_requested_days,
+        "n_missing_days": n_missing_days,
+        "requests_start": first_day,
+        "requests_end": last_day,
+    }
 
 
 @app.command()
@@ -65,44 +94,24 @@ def download_maxjeune():
 
 
 @app.command()
-def has_missing_requests():
-    """Find requests that are missing in the downloaded data."""
-    requests = (
-        scan_files()
-        .select("file_path", "request_date")
-        .unique(("file_path", "request_date"))
-        .sort("request_date")
-        .collect()
-    )
+def download_aux():
+    """Download auxiliary data that will be used in the analysis."""
 
-    n_missing_days = (
-        requests.select(diff=pl.col("request_date").dt.date().diff().drop_nulls())
-        .filter(pl.col("diff").dt.total_days() > 1)
-        .count()
-        .item()
+    pl.read_csv(STATIONS_DATA_URL, separator=";").write_parquet(
+        DATA_FOLDER / "stations.pq"
     )
-    n_requested_days = requests.n_unique(pl.col("request_date").dt.date())
-    first_day = requests.select(pl.col("request_date").dt.date().min()).item()
-    last_day = requests.select(pl.col("request_date").dt.date().max()).item()
-
-    print(
-        f"Total of {n_requested_days} days of data with {n_missing_days} request missing between {first_day} and {last_day}"
-    )
-    print(f"Found {n_missing_days} request days missing")
-
-    return {
-        "n_requested_days": n_requested_days,
-        "n_missing_days": n_missing_days,
-        "requests_start": first_day,
-        "requests_end": last_day,
-    }
+    print(f"Downloaded station data to {DATA_FOLDER / "stations.pq"}")
 
 
 @app.command()
 def update_readme():
-    """Plot the number of available trips at each request date and update the
-    readme with the total number of request days and missing days"""
+    """Add stats and a chart to README.md.
 
+    Plot the number of available trips at each request date and update the
+    readme with the total number of request days and missing days
+    """
+
+    # Create the chart
     n_available_trips = (
         scan_files()
         .group_by("request_date")
@@ -137,6 +146,7 @@ def update_readme():
     )
     plot.save("assets/n_available_trips.svg")
 
+    # Update the readme
     readme_str = Path("README.md").read_text()
 
     for variable, value in has_missing_requests().items():
@@ -153,6 +163,56 @@ def update_readme():
         readme_str = readme_str.replace(to_replace, value)
 
     Path("README.md").write_text(readme_str)
+
+
+@app.command()
+def name_changes():
+    """Print iata codes that have multiple names.
+
+    Some origin/destinations changed named for the same IATA identifier
+    during the data collection. This detects those.
+    """
+
+    origin_name_changes = (
+        scan_files()
+        .group_by("origine", "origine_iata")
+        .agg()
+        .group_by(iata="origine_iata")
+        .agg(names=pl.col("origine").unique())
+        .filter(pl.col("names").list.len() > 1)
+        .collect(engine="streaming")
+    )
+
+    destination_name_changes = (
+        scan_files()
+        .group_by("destination", "destination_iata")
+        .agg()
+        .group_by(iata="destination_iata")
+        .agg(names=pl.col("destination").unique())
+        .filter(pl.col("names").list.len() > 1)
+        .collect(engine="streaming")
+    )
+
+    name_changes = (
+        pl.concat((origin_name_changes, destination_name_changes))
+        .group_by("iata")
+        .agg(pl.col("names").flatten())
+        .with_columns(pl.col("names").list.unique())
+    )
+
+    print(name_changes.to_dicts())
+
+
+@app.command()
+def dev():
+    available_seats = (
+        scan_files()
+        .group_by("request_date", "origine_iata", "destination_iata")
+        .agg(available=pl.col("has_seat").sum(), total=pl.col("has_seat").len())
+        .collect(engine="streaming")
+    )
+
+    print(available_seats)
 
 
 if __name__ == "__main__":
