@@ -14,10 +14,10 @@ Les données sont téléchargées au format csv, transformées au format parquet
 La description des champs de données est consultable sur la [page](https://ressources.data.sncf.com/explore/dataset/tgvmax/information/) du jeu de données.
 
 Chaque jour les données sont sauvegardées dans le fichier `data/maxjeune/{id}.pq`. 
-Le numéro de dans le nom du fichier n'a pas de sens particulier et est incrémenté chaque jour.
+Le numéro dans le nom du fichier n'a pas de sens particulier et est incrémenté chaque jour.
 
 ## Réutilisation 
-Les données sont produites par la SNCF, la license est indiquée sur la [page](https://ressources.data.sncf.com/explore/dataset/tgvmax/information/) du jeu de données.
+Les données sont produites par la SNCF, la licence est indiquée sur la [page](https://ressources.data.sncf.com/explore/dataset/tgvmax/information/) du jeu de données.
 Vous en faites ce que vous voulez.
 
 ## TODO
@@ -25,6 +25,6 @@ Vous en faites ce que vous voulez.
 - [x] Convertir les anciennes données en format parquet
 - [x] Retirer les artefacts de scrapy dans les anciennes données (colonnes "_key" et "_type")
 - [x] Ajouter les anciennes données dans le dépot
-- [ ] Ajouter un calcul de différences avec le jour précédent dans `download-maxjeune` pour que la CI échoue si on retélécharge les mêmes donnée
-- [x] Automatiquement mettre à jour le readme avec le nombre de jours scrapés et le nombre de jours maquant
+- [ ] Ajouter un calcul de différences avec le jour précédent dans `download-maxjeune` pour que la CI échoue si on retélécharge les mêmes données
+- [x] Automatiquement mettre à jour le readme avec le nombre de jours scrapés et le nombre de jours maquants
 - [ ] Automatiquement mettre à jour le readme avec un graphe qui indique le nombre de trajets disponibles dans les 30 prochains jours pour chaque jour de requête (si facile, sous forme de carte animée ?).
