@@ -6,12 +6,7 @@ import polars as pl
 
 MAXJEUNE_DATA_URL = "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/tgvmax/exports/csv"
 DATA_FOLDER = Path("data")
-SCHEMA = {
-    "date": pl.Date,
-    # "heure_depart": pl.Time,
-    # "heure_arrivee": pl.Time,
-    "request_date": pl.Datetime,
-}
+SCHEMA = {"date": pl.Date, "request_date": pl.Datetime}
 
 app = typer.Typer()
 
@@ -31,6 +26,19 @@ def scan_csv():
 
 
 @app.command()
+def convert(from_dir: Path, to_dir: Path):
+    """Convert and clean data scraped with scrapy to parquet."""
+
+    for csv_file in from_dir.glob("*.csv"):
+        pq_file = to_dir / (csv_file.stem + ".pq")
+        pl.read_csv(csv_file, schema_overrides=SCHEMA).with_columns(
+            pl.col("heure_depart").str.to_time("%H:%M"),
+            pl.col("heure_arrivee").str.to_time("%H:%M"),
+        ).drop("_key", "_type").write_parquet(pq_file)
+        print(pl.read_parquet(pq_file))
+
+
+@app.command()
 def download_maxjeune():
     """Download the maxjeune data.
 
@@ -40,14 +48,20 @@ def download_maxjeune():
     maxjeune_folder = DATA_FOLDER / "maxjeune"
     maxjeune_folder.mkdir(exist_ok=True, parents=True)
 
-    file_numbers = sorted(int(file.stem) for file in maxjeune_folder.glob("*.csv"))
+    file_numbers = sorted(int(file.stem) for file in maxjeune_folder.glob("*.pq"))
     if len(file_numbers) == 0:
-        next_file = maxjeune_folder / "1.csv"
+        next_file = maxjeune_folder / "1.pq"
     else:
-        next_file = maxjeune_folder / f"{int(file_numbers[-1]) + 1}.csv"
+        next_file = maxjeune_folder / f"{int(file_numbers[-1]) + 1}.pq"
 
-    data = pl.read_csv(MAXJEUNE_DATA_URL).with_columns(request_date=datetime.now())
-    data.write_csv(next_file)
+    data = pl.read_csv(
+        MAXJEUNE_DATA_URL, separator=";", schema_overrides=SCHEMA
+    ).with_columns(
+        pl.col("heure_depart").str.to_time("%H:%M"),
+        pl.col("heure_arrivee").str.to_time("%H:%M"),
+        request_date=datetime.now(),
+    )
+    data.write_parquet(next_file)
 
     print(f"File downloaded to {next_file}")
 
