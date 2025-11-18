@@ -31,7 +31,7 @@ def has_missing_requests():
         .select("file_path", "request_date")
         .unique(("file_path", "request_date"))
         .sort("request_date")
-        .collect()
+        .collect(engine="streaming")
     )
 
     n_missing_days = (
@@ -134,7 +134,7 @@ def update_readme():
             disponible=(pl.col("has_seat") == True).sum(),
             total=pl.col("has_seat").len(),
         )
-        .collect()
+        .collect(engine="streaming")
         .unpivot(on=["disponible", "total"], index="request_date")
     )
 
