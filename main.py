@@ -16,6 +16,7 @@ app = typer.Typer()
 
 def scan_files():
     """Read and parse all Max Jeune CSV files."""
+
     return pl.scan_parquet(
         DATA_FOLDER / "maxjeune" / "*.pq", include_file_paths="file_path"
     ).with_columns(
