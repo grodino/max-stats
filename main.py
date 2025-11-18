@@ -97,9 +97,24 @@ def download_maxjeune():
 def download_aux():
     """Download auxiliary data that will be used in the analysis."""
 
-    pl.read_csv(STATIONS_DATA_URL, separator=";").write_parquet(
-        DATA_FOLDER / "stations.pq"
+    stations = (
+        pl.read_csv(STATIONS_DATA_URL, separator=";")
+        .with_columns(
+            pl.col("position_geographique")
+            .str.split(",")
+            .list.to_struct(fields=["lattitude", "longitude"])
+            .struct.unnest(),
+            iata=pl.lit("FR") + pl.col("libellecourt").str.to_uppercase(),
+        )
+        .with_columns(
+            pl.col("lattitude").str.strip_chars(" ").cast(pl.Float64),
+            pl.col("longitude").str.strip_chars(" ").cast(pl.Float64),
+        )
+        .drop("position_geographique", "libellecourt")
     )
+
+    stations.write_parquet(DATA_FOLDER / "stations.pq")
+    stations.write_csv(DATA_FOLDER / "stations.csv")
     print(f"Downloaded station data to {DATA_FOLDER / "stations.pq"}")
 
 
@@ -194,25 +209,113 @@ def name_changes():
     )
 
     name_changes = (
-        pl.concat((origin_name_changes, destination_name_changes))
-        .group_by("iata")
-        .agg(pl.col("names").flatten())
-        .with_columns(pl.col("names").list.unique())
+        destination_name_changes.join(origin_name_changes, on="iata", how="full")
+        .with_columns(
+            pl.col("names").fill_null(pl.lit([])),
+            pl.col("names_right").fill_null(pl.lit([])),
+        )
+        .with_columns(names=pl.concat_list("names", "names_right").list.unique())
+        .drop("names_right", "iata_right")
     )
 
-    print(name_changes.to_dicts())
+    print("Found", len(name_changes), "name changes")
+    name_changes.write_json("name_changes.json")
+
+    return name_changes
 
 
 @app.command()
 def dev():
-    available_seats = (
+    stations = pl.read_parquet("data/stations.pq").select(
+        "iata", "lattitude", "longitude", "nom"
+    )
+    # available_seats = (
+    #     scan_files()
+    #     .group_by("request_date", "origine_iata", "destination_iata")
+    #     .agg(available=pl.col("has_seat").sum(), total=pl.col("has_seat").len())
+    #     .collect(engine="streaming")
+    #     .join(stations, left_on="origine_iata", right_on="iata")
+    #     .rename({"lattitude": "origine_lattitude", "longitude": "origine_longitude"})
+    #     .join(stations, left_on="destination_iata", right_on="iata")
+    #     .rename(
+    #         {"lattitude": "destination_lattitude", "longitude": "destination_longitude"}
+    #     )
+    # )
+
+    # FIXME: there are stations in the MAXJEUNE data that are not available in
+    # the stations data...
+    tgv_origins = stations.join(
         scan_files()
-        .group_by("request_date", "origine_iata", "destination_iata")
-        .agg(available=pl.col("has_seat").sum(), total=pl.col("has_seat").len())
-        .collect(engine="streaming")
+        .select(name=pl.col("origine"), iata=pl.col("origine_iata"))
+        .group_by("name", "iata")
+        .agg()
+        .collect(engine="streaming"),
+        on="iata",
+        how="right",
+    )
+    tgv_destinations = stations.join(
+        scan_files()
+        .select(name=pl.col("destination"), iata=pl.col("destination_iata"))
+        .group_by("name", "iata")
+        .agg()
+        .collect(engine="streaming"),
+        on="iata",
+        how="right",
     )
 
-    print(available_seats)
+    print(
+        len(tgv_origins) - len(tgv_origins.drop_nulls()),
+        "/",
+        len(tgv_origins),
+        "origin stations missing from stations.csv",
+    )
+    print(
+        len(tgv_destinations) - len(tgv_destinations.drop_nulls()),
+        "/",
+        len(tgv_destinations),
+        "destination stations missing from stations.csv",
+    )
+
+    tgv_origins.filter(pl.col("nom").is_null()).write_csv("missing_origins.csv")
+    return
+    tgv_stations = pl.concat((tgv_origins, tgv_destinations)).unique("iata")
+
+    print(
+        len(tgv_stations) - len(tgv_stations.drop_nulls()),
+        "/",
+        len(tgv_stations),
+        "stations missing from stations.csv",
+    )
+
+    tgv_stations = tgv_stations.drop_nulls()
+    tgv_stations.write_csv("tgv_stations.csv")
+
+    trips = (
+        (
+            scan_files()
+            .filter(file_path="data/maxjeune/432.pq")
+            .group_by("origine_iata", "destination_iata")
+            .agg(available=pl.col("has_seat").sum(), total=pl.col("has_seat").len())
+            .collect(engine="streaming")
+        )
+        .join(
+            tgv_stations.select("iata"),
+            left_on="origine_iata",
+            right_on="iata",
+            how="right",
+            coalesce=False,
+        )
+        .join(
+            tgv_stations.select("iata"),
+            left_on="destination_iata",
+            right_on="iata",
+            how="right",
+            coalesce=False,
+        )
+        .drop("iata", "iata_right")
+    )
+    print(trips)
+    trips.write_csv("tgv_trips.csv")
 
 
 if __name__ == "__main__":
