@@ -4,7 +4,7 @@ Les disponibilité de places [MAXJEUNE](https://ressources.data.sncf.com/explore
 renouvellées tous les jours par la SNCF MAIS les anciennes données ne sont pas accessibles.
 Ce dépot sauvegarde les [données](https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/tgvmax/exports/csv) tous les jours à **22h22**.
  
-Ce jeu de données archive **<span id="n_requested_days">420</span> jours** de requêtes du **<span id="requests_start">2024-09-26</span>** au **<span id="requests_end">2025-11-19</span>**. Il manque **<span id="n_missing_days">0</span> jours**. 
+Ce jeu de données archive **<span id="n_requested_days">421</span> jours** de requêtes du **<span id="requests_start">2024-09-26</span>** au **<span id="requests_end">2025-11-20</span>**. Il manque **<span id="n_missing_days">0</span> jours**. 
 
 ![Graphique du nombre de trajets disponible en MAXJEUNE en fonction de la date de réservation](assets/n_available_trips.svg)
 
