@@ -6,7 +6,11 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "altair>=6.0.0",
+    "matplotlib>=3.10.7",
     "polars>=1.35.1",
+    "pyarrow>=22.0.0",
+    "skrub>=0.6.2",
+    "sqlalchemy>=2.0.44",
     "typer-slim>=0.20.0",
     "vegafusion>=2.0.3",
     "vl-convert-python>=1.8.0",

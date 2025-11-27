@@ -1,0 +1,48 @@
+<svg width="800" height="200" xmlns="http://www.w3.org/2000/svg">
+    <g fill="none" fill-rule="evenodd">
+        <g transform="translate(50 50)">
+            <rect fill="#E3F2FD" stroke="#2196F3" stroke-width="2" x="0" y="0" width="150" height="100" rx="10" /> <text
+                fill="#000" font-family="Arial-BoldMT, Arial" font-size="14" font-weight="bold">
+                <tspan x="20" y="45">1. Data Collection</tspan>
+            </text> <text fill="#000" font-family="ArialMT, Arial" font-size="12">
+                <tspan x="20" y="70">Gather raw data,</tspan>
+                <tspan x="20" y="85">preprocess, clean.</tspan>
+            </text>
+        </g>
+        <path fill="#9E9E9E" d="M210 100L240 100L240 90L260 105L240 120L240 110L210 110Z"
+            transform="translate(50 50)" />
+        <g transform="translate(280 50)">
+            <rect fill="#F1F8E9" stroke="#8BC34A" stroke-width="2" x="0" y="0" width="180" height="100" rx="10" /> <text
+                fill="#000" font-family="Arial-BoldMT, Arial" font-size="14" font-weight="bold">
+                <tspan x="20" y="45">2. Architecture &amp;</tspan>
+                <tspan x="20" y="60">Loss Choice</tspan>
+            </text> <text fill="#000" font-family="ArialMT, Arial" font-size="12">
+                <tspan x="20" y="85">Select model structure,</tspan>
+                <tspan x="20" y="100">define loss function.</tspan>
+            </text>
+        </g>
+        <path fill="#9E9E9E" d="M470 100L500 100L500 90L520 105L500 120L500 110L470 110Z"
+            transform="translate(50 50)" />
+        <g transform="translate(530 50)">
+            <rect fill="#FFF8E1" stroke="#FFC107" stroke-width="2" x="0" y="0" width="160" height="100" rx="10" /> <text
+                fill="#000" font-family="Arial-BoldMT, Arial" font-size="14" font-weight="bold">
+                <tspan x="20" y="45">3. Training &amp;</tspan>
+                <tspan x="20" y="60">Evaluation</tspan>
+            </text> <text fill="#000" font-family="ArialMT, Arial" font-size="12">
+                <tspan x="20" y="85">Train on data,</tspan>
+                <tspan x="20" y="100">validate performance.</tspan>
+            </text>
+        </g>
+        <path fill="#9E9E9E" d="M700 100L730 100L730 90L750 105L730 120L730 110L700 110Z"
+            transform="translate(50 50)" />
+        <g transform="translate(760 50)">
+            <rect fill="#FBE9E7" stroke="#FF5722" stroke-width="2" x="0" y="0" width="140" height="100" rx="10" /> <text
+                fill="#000" font-family="Arial-BoldMT, Arial" font-size="14" font-weight="bold">
+                <tspan x="20" y="45">4. Model Serving</tspan>
+            </text> <text fill="#000" font-family="ArialMT, Arial" font-size="12">
+                <tspan x="20" y="70">Deploy for</tspan>
+                <tspan x="20" y="85">inference, monitor.</tspan>
+            </text>
+        </g>
+    </g>
+</svg>

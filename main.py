@@ -1,3 +1,4 @@
+from pprint import pprint
 import re
 from pathlib import Path
 from datetime import datetime
@@ -5,16 +6,33 @@ from datetime import datetime
 import typer
 import polars as pl
 import altair as alt
+from skrub import fuzzy_join, TableReport
 
 MAXJEUNE_DATA_URL = "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/tgvmax/exports/csv"
-STATIONS_DATA_URL = "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/gares-de-voyageurs/exports/csv"
+
+# URL encoding of the following Overpass query
+# [out:csv(::lat, ::lon, name, "ref:FR:sncf:resarail", "ref:FR:uic8", "railway:ref"; true; ",")][timeout:150];
+# node["ref:FR:sncf:resarail"];
+# out;
+STATIONS_DATA_URL = "https://overpass-api.de/api/interpreter?data=%5Bout%3Acsv%28%3A%3Alat%2C%20%3A%3Alon%2C%20name%2C%20%22ref%3AFR%3Asncf%3Aresarail%22%2C%20%22ref%3AFR%3Auic8%22%2C%20%22railway%3Aref%22%3B%20true%3B%20%22%2C%22%29%5D%5Btimeout%3A150%5D%3B%0Anode%5B%22ref%3AFR%3Asncf%3Aresarail%22%5D%3B%0Aout%3B"
+
 DATA_FOLDER = Path("data")
 SCHEMA = {"date": pl.Date, "request_date": pl.Datetime}
+TRAIN = [
+    "date",
+    "train_no",
+    "origine_iata",
+    "destination_iata",
+    "heure_depart",
+    "heure_arrivee",
+]
 
 app = typer.Typer()
 
+pl.Config.set_tbl_cols(-1)
 
-def scan_files():
+
+def scan_files() -> pl.LazyFrame:
     """Read and parse all Max Jeune CSV files."""
 
     return pl.scan_parquet(
@@ -51,6 +69,114 @@ def has_missing_requests():
         "requests_start": first_day,
         "requests_end": last_day,
     }
+
+
+def plot_n_trains_availability() -> alt.Chart:
+    """Plot the number of available trips in the next 30 days at each request date"""
+
+    # Create the chart
+    n_available_trips = (
+        scan_files()
+        .group_by("request_date")
+        .agg(
+            disponible=(pl.col("has_seat") == True).sum(),  # noqa: E712
+            total=pl.col("has_seat").len(),
+        )
+        .collect(engine="streaming")
+        .unpivot(on=["disponible", "total"], index="request_date")
+    )
+
+    alt.renderers.enable("browser")
+    plot = (
+        alt.Chart(
+            n_available_trips,
+            width=400,
+            height=200,
+            title="Historique du nombre de trajets MAXJEUNE et au total, disponibles chaque jour",
+        )
+        .mark_line()
+        .encode(
+            x=alt.X(
+                "request_date",
+                title="Date de la recherche",
+                axis=alt.Axis(format="%B %Y"),
+            ),
+            y=alt.Y("value", title="Nombre de trajets"),
+            color=alt.Color("variable").legend(title=None),
+        )
+        .configure_legend(orient="top")
+        .configure_axisX(labelAngle=45)
+    )
+
+    return plot
+
+
+@app.command()
+def schema():
+    pprint(scan_files().collect_schema())
+
+
+@app.command()
+def plot_n_days_availability() -> alt.Chart:
+    """Plot the number of days a trip was available in the 30 days before its departure.
+
+    NOTE: some trips have multiple carriages, thus might be counted twice in the
+    total and available counts.
+    """
+
+    TRAIN = [
+        "date",
+        "train_no",
+        "origine_iata",
+        "destination_iata",
+        "heure_depart",
+        "heure_arrivee",
+    ]
+
+    n_available_days = (
+        scan_files()
+        # In case of trains with multiple carriages, we aggregate the disponibility of seats.
+        .group_by(*TRAIN)
+        .agg(
+            disponible=pl.col("request_date").filter(pl.col("has_seat") == True).sum(),
+            total=pl.col("has_seat").len(),
+        )
+        .filter(
+            pl.col("date") > pl.col("date").min() + pl.duration(days=31),
+            pl.col("date") < pl.col("date").max() - pl.duration(days=31),
+        )
+        .group_by("date")
+        .agg(pl.col("disponible").mean(), pl.col("total").mean())
+        .collect(engine="streaming")
+        .unpivot(on=["disponible", "total"], index="date")
+    )
+
+    alt.renderers.enable("browser")
+    alt.data_transformers.enable("vegafusion")
+    plot = (
+        alt.Chart(
+            n_available_days,
+            width=400,
+            height=200,
+            title="Historique du nombre de trajets MAXJEUNE et au total, disponibles chaque jour",
+        )
+        .mark_line()
+        .encode(
+            x=alt.X(
+                "date",
+                title="Date du train",
+                axis=alt.Axis(format="%B %Y"),
+            ),
+            y=alt.Y("value", title="Nombre de jours"),
+            color=alt.Color("variable").legend(title=None),
+            tooltip=["date", "value"],
+        )
+        .configure_legend(orient="top")
+        .configure_axisX(labelAngle=45)
+    )
+    plot.show()
+
+    return plot
 
 
 @app.command()
@@ -98,25 +224,15 @@ def download_maxjeune():
 def download_aux():
     """Download auxiliary data that will be used in the analysis."""
 
-    stations = (
-        pl.read_csv(STATIONS_DATA_URL, separator=";")
-        .with_columns(
-            pl.col("position_geographique")
-            .str.split(",")
-            .list.to_struct(fields=["lattitude", "longitude"])
-            .struct.unnest(),
-            iata=pl.lit("FR") + pl.col("libellecourt").str.to_uppercase(),
-        )
-        .with_columns(
-            pl.col("lattitude").str.strip_chars(" ").cast(pl.Float64),
-            pl.col("longitude").str.strip_chars(" ").cast(pl.Float64),
-        )
-        .drop("position_geographique", "libellecourt")
+    stations = pl.read_csv(
+        STATIONS_DATA_URL, schema_overrides={"ref:FR:uic8": pl.String}
     )
 
     stations.write_parquet(DATA_FOLDER / "stations.pq")
     stations.write_csv(DATA_FOLDER / "stations.csv")
     print(f"Downloaded station data to {DATA_FOLDER / "stations.pq"}")
+
+    TableReport(stations).open()
 
 
 @app.command()
@@ -127,39 +243,7 @@ def update_readme():
     readme with the total number of request days and missing days
     """
 
-    # Create the chart
-    n_available_trips = (
-        scan_files()
-        .group_by("request_date")
-        .agg(
-            disponible=(pl.col("has_seat") == True).sum(),
-            total=pl.col("has_seat").len(),
-        )
-        .collect(engine="streaming")
-        .unpivot(on=["disponible", "total"], index="request_date")
-    )
-
-    alt.renderers.enable("browser")
-    plot = (
-        alt.Chart(
-            n_available_trips,
-            width=400,
-            height=200,
-            title="Historique du nombre de trajets MAXJEUNE et au total, disponibles chaque jour",
-        )
-        .mark_line()
-        .encode(
-            x=alt.X(
-                "request_date",
-                title="Date de la recherche",
-                axis=alt.Axis(format="%B %Y"),
-            ),
-            y=alt.Y("value", title="Nombre de trajets"),
-            color=alt.Color("variable").legend(title=None),
-        )
-        .configure_legend(orient="top")
-        .configure_axisX(labelAngle=45)
-    )
+    plot = plot_n_trains_availability()
     plot.save("assets/n_available_trips.svg")
 
     # Update the readme
@@ -223,6 +307,101 @@ def name_changes():
     name_changes.write_json("name_changes.json")
 
     return name_changes
+
+
+@app.command()
+def iata_inconsistencies():
+    stations = pl.read_parquet("data/stations.pq").rename(
+        {"ref:FR:sncf:resarail": "iata"}
+    )
+    print(stations)
+    origins = (
+        scan_files()
+        .filter(pl.col("origine") != "TBD")
+        .select("origine", iata="origine_iata")
+        .unique("iata")
+        .collect(engine="streaming")
+    )
+    print(origins)
+    missing = origins.join(stations, on="iata", how="anti").select("iata")
+
+    print(
+        scan_files()
+        .filter(pl.col("origine") != "TBD")
+        .tail(1_000_000)
+        .join(missing.lazy(), left_on="origine_iata", right_on="iata")
+        .unique(TRAIN)
+        .collect(engine="streaming")
+    )
+
+    return
+
+    stations = pl.read_parquet("data/stations.pq").select("iata", "nom")
+    origins = (
+        scan_files()
+        .select(iata=pl.col("origine_iata").unique())
+        .collect(engine="streaming")
+    )
+
+    destinations = (
+        scan_files()
+        .select(iata=pl.col("destination_iata").unique())
+        .collect(engine="streaming")
+    )
+    assert (
+        len(origins.join(destinations, on="iata", how="anti")) == 0
+    ), """The are destination that are not origins (or vice-versa)"""
+
+    print(stations)
+    print(origins)
+
+    print(
+        "Number of iata in maxjeune data not in stations:",
+        len(origins.join(stations, on="iata", how="anti")),
+        "/",
+        len(origins),
+    )
+    print(
+        "Number of iata in stations data not in maxjeune:",
+        len(stations.join(origins, on="iata", how="anti")),
+        "/",
+        len(stations),
+    )
+
+    origins_names = (
+        scan_files()
+        .filter(pl.col("origine") != "TBD", pl.col("origine") != "")
+        .select("origine", "origine_iata")
+        .unique(["origine", "origine_iata"])
+        .collect(engine="streaming")
+    )
+    print(origins_names)
+
+    origin_to_station: pl.DataFrame = fuzzy_join(
+        origins_names, stations, left_on="origine", right_on="nom", add_match_info=True
+    ).filter(pl.col("nom").str.len_chars() > 0)
+    print(
+        origin_to_station.group_by("origine_iata", "origine")
+        .agg(pl.col("iata", "nom").sort_by("skrub_Joiner_rescaled_distance").first())
+        .sort("origine_iata")
+    )
+
+    station_to_origin: pl.DataFrame = fuzzy_join(
+        stations,
+        origins_names,
+        left_on="nom",
+        right_on="origine",
+        add_match_info=True,
+    ).filter(pl.col("origine").str.len_chars() > 0)
+    print(
+        station_to_origin.group_by("iata", "nom")
+        .agg(
+            pl.col("origine_iata", "origine")
+            .sort_by("skrub_Joiner_rescaled_distance")
+            .first()
+        )
+        .sort("iata")
+    )
 
 
 @app.command()
