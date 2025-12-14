@@ -136,17 +136,21 @@ def plot_n_days_availability() -> alt.Chart:
     n_available_days = (
         scan_files()
         # In case of trains with multiple carriages, we aggregate the disponibility of seats.
-        .group_by(*TRAIN)
-        .agg(
-            disponible=pl.col("request_date").filter(pl.col("has_seat") == True).sum(),
-            total=pl.col("has_seat").len(),
-        )
+        # .group_by(*TRAIN)
+        # .agg(
+        #     disponible=pl.col("request_date").filter(pl.col("has_seat") == True).sum(),
+        #     total=pl.col("has_seat").len(),
+        # )
         .filter(
             pl.col("date") > pl.col("date").min() + pl.duration(days=31),
             pl.col("date") < pl.col("date").max() - pl.duration(days=31),
         )
         .group_by("date")
-        .agg(pl.col("disponible").mean(), pl.col("total").mean())
+        .agg(
+            disponible=pl.col("has_seat").sum(),
+            total=pl.col("has_seat").len(),
+        )
+        # .agg(pl.col("disponible").mean(), pl.col("total").mean())
         .collect(engine="streaming")
         .unpivot(on=["disponible", "total"], index="date")
     )
@@ -158,7 +162,7 @@ def plot_n_days_availability() -> alt.Chart:
             n_available_days,
             width=400,
             height=200,
-            title="Historique du nombre de trajets MAXJEUNE et au total, disponibles chaque jour",
+            title="Historique du nombre de jours les trajets MAXJEUNE sont disponibles en moyenne",
         )
         .mark_line()
         .encode(
