@@ -9,13 +9,7 @@ import altair as alt
 from skrub import fuzzy_join, TableReport
 
 MAXJEUNE_DATA_URL = "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/tgvmax/exports/csv"
-
-# URL encoding of the following Overpass query
-# [out:csv(::lat, ::lon, name, "ref:FR:sncf:resarail", "ref:FR:uic8", "railway:ref"; true; ",")][timeout:150];
-# node["ref:FR:sncf:resarail"];
-# out;
-STATIONS_DATA_URL = "https://overpass-api.de/api/interpreter?data=%5Bout%3Acsv%28%3A%3Alat%2C%20%3A%3Alon%2C%20name%2C%20%22ref%3AFR%3Asncf%3Aresarail%22%2C%20%22ref%3AFR%3Auic8%22%2C%20%22railway%3Aref%22%3B%20true%3B%20%22%2C%22%29%5D%5Btimeout%3A150%5D%3B%0Anode%5B%22ref%3AFR%3Asncf%3Aresarail%22%5D%3B%0Aout%3B"
-
+STATIONS_DATA_URL = "https://raw.githubusercontent.com/trainline-eu/stations/refs/heads/master/stations.csv"
 DATA_FOLDER = Path("data")
 SCHEMA = {"date": pl.Date, "request_date": pl.Datetime}
 TRAIN = [
@@ -26,20 +20,48 @@ TRAIN = [
     "heure_depart",
     "heure_arrivee",
 ]
+IATA_MATCH = {"FRPAZ": "FRESB", "FRPNO": "FRCCP"}
+
 
 app = typer.Typer()
 
 pl.Config.set_tbl_cols(-1)
 
 
-def scan_files() -> pl.LazyFrame:
-    """Read and parse all Max Jeune CSV files."""
+def scan_files(apply_trip_filters: bool = False) -> pl.LazyFrame:
+    """Read and parse all Max Jeune CSV files. Optionally apply filters."""
 
-    return pl.scan_parquet(
+    data = pl.scan_parquet(
         DATA_FOLDER / "maxjeune" / "*.pq", include_file_paths="file_path"
     ).with_columns(
         has_seat=pl.col("od_happy_card") == "OUI",
         days_to_trip=(pl.col("date") - pl.col("request_date")).dt.total_days(),
+    )
+
+    if apply_trip_filters:
+        data = data.filter(
+            *trip_filters(name="origine"), trip_filters(name="destination")
+        )
+
+    return data
+
+
+def trip_filters(name="name", axe="axe"):
+    """Filters to remove trips that have an inconsistent name or are oustide of
+    MAXJEUNE scope
+
+    - Some origins/destinations are described as TBD, then with a name in the
+      files. I remove pairs with TBD as name.
+    - Some origin/destinations are empty strings.I remove them.
+    - Some origins/destinations correspond to buses. I remove them.
+    - Some origins/destinations correspond to international train stations. I
+      remove them.
+    """
+    return (
+        pl.col(name) != "TBD",
+        pl.col(name) != "",
+        pl.col(axe) != "AUTOCAR SNCF",
+        pl.col(axe) != "INTERNATIONAL",
     )
 
 
@@ -76,7 +98,7 @@ def plot_n_trains_availability() -> alt.Chart:
 
     # Create the chart
     n_available_trips = (
-        scan_files()
+        scan_files(apply_trip_filters=True)
         .group_by("request_date")
         .agg(
             disponible=(pl.col("has_seat") == True).sum(),  # noqa: E712
@@ -112,8 +134,15 @@ def plot_n_trains_availability() -> alt.Chart:
 
 
 @app.command()
-def schema():
+def describe():
     pprint(scan_files().collect_schema())
+    print(
+        scan_files()
+        .select(pl.col("axe").unique())
+        .collect(engine="streaming")
+        .to_series()
+        .to_list()
+    )
 
 
 @app.command()
@@ -229,14 +258,20 @@ def download_aux():
     """Download auxiliary data that will be used in the analysis."""
 
     stations = pl.read_csv(
-        STATIONS_DATA_URL, schema_overrides={"ref:FR:uic8": pl.String}
-    )
+        STATIONS_DATA_URL,
+        separator=";",
+        schema_overrides={
+            "name": pl.String,
+            "latitude": pl.Float64,
+            "longitude": pl.Float64,
+            "sncf_id": pl.String,
+        },
+        infer_schema=False,
+    ).rename({"sncf_id": "iata"})
 
     stations.write_parquet(DATA_FOLDER / "stations.pq")
     stations.write_csv(DATA_FOLDER / "stations.csv")
     print(f"Downloaded station data to {DATA_FOLDER / "stations.pq"}")
-
-    TableReport(stations).open()
 
 
 @app.command()
@@ -307,109 +342,66 @@ def name_changes():
         .drop("names_right", "iata_right")
     )
 
+    for change in name_changes.to_dicts():
+        print(change["iata"], ", ".join(change["names"]))
+
     print("Found", len(name_changes), "name changes")
-    name_changes.write_json("name_changes.json")
 
     return name_changes
 
 
 @app.command()
-def iata_inconsistencies():
-    stations = pl.read_parquet("data/stations.pq").rename(
-        {"ref:FR:sncf:resarail": "iata"}
-    )
-    print(stations)
+def match_iata():
+    """Validate that the iata ids from the MAXJEUNE data match the iata ids in
+    the trainline train station data"""
+
+    ############################################################################
+    # 1. Collect all (name, iata) from origins and destinations.               #
+    ############################################################################
     origins = (
-        scan_files()
-        .filter(pl.col("origine") != "TBD")
-        .select("origine", iata="origine_iata")
-        .unique("iata")
-        .collect(engine="streaming")
-    )
-    print(origins)
-    missing = origins.join(stations, on="iata", how="anti").select("iata")
-
-    print(
-        scan_files()
-        .filter(pl.col("origine") != "TBD")
-        .tail(1_000_000)
-        .join(missing.lazy(), left_on="origine_iata", right_on="iata")
-        .unique(TRAIN)
-        .collect(engine="streaming")
-    )
-
-    return
-
-    stations = pl.read_parquet("data/stations.pq").select("iata", "nom")
-    origins = (
-        scan_files()
-        .select(iata=pl.col("origine_iata").unique())
-        .collect(engine="streaming")
-    )
-
-    destinations = (
-        scan_files()
-        .select(iata=pl.col("destination_iata").unique())
-        .collect(engine="streaming")
-    )
-    assert (
-        len(origins.join(destinations, on="iata", how="anti")) == 0
-    ), """The are destination that are not origins (or vice-versa)"""
-
-    print(stations)
-    print(origins)
-
-    print(
-        "Number of iata in maxjeune data not in stations:",
-        len(origins.join(stations, on="iata", how="anti")),
-        "/",
-        len(origins),
-    )
-    print(
-        "Number of iata in stations data not in maxjeune:",
-        len(stations.join(origins, on="iata", how="anti")),
-        "/",
-        len(stations),
-    )
-
-    origins_names = (
-        scan_files()
-        .filter(pl.col("origine") != "TBD", pl.col("origine") != "")
-        .select("origine", "origine_iata")
+        scan_files(apply_trip_filters=True)  # noqa: F821
         .unique(["origine", "origine_iata"])
+        .select("axe", name="origine", iata="origine_iata")
         .collect(engine="streaming")
     )
-    print(origins_names)
-
-    origin_to_station: pl.DataFrame = fuzzy_join(
-        origins_names, stations, left_on="origine", right_on="nom", add_match_info=True
-    ).filter(pl.col("nom").str.len_chars() > 0)
-    print(
-        origin_to_station.group_by("origine_iata", "origine")
-        .agg(pl.col("iata", "nom").sort_by("skrub_Joiner_rescaled_distance").first())
-        .sort("origine_iata")
-    )
-
-    station_to_origin: pl.DataFrame = fuzzy_join(
-        stations,
-        origins_names,
-        left_on="nom",
-        right_on="origine",
-        add_match_info=True,
-    ).filter(pl.col("origine").str.len_chars() > 0)
-    print(
-        station_to_origin.group_by("iata", "nom")
-        .agg(
-            pl.col("origine_iata", "origine")
-            .sort_by("skrub_Joiner_rescaled_distance")
-            .first()
+    destinations = (
+        scan_files(apply_trip_filters=True)
+        .unique(["destination", "destination_iata"])
+        .select(
+            "axe",
+            name="destination",
+            iata="destination_iata",
         )
-        .sort("iata")
+        .collect(engine="streaming")
     )
+    pairs: pl.DataFrame = pl.concat([origins, destinations]).unique(["name", "iata"])
+
+    ############################################################################
+    # 2. Filter out (name, iata) pairs that are not relevant for MAXJEUNE.     #
+    ############################################################################
+    pairs = pairs.filter(trip_filters())
+
+    ############################################################################
+    # 3. Match iata to the resarail iata.                                      #
+    ############################################################################
+    stations = pl.read_parquet("data/stations.pq").select(
+        "name", "iata", "latitude", "longitude"
+    )
+
+    if len(pairs.join(stations, on="iata", how="anti")) > 0:
+        print(pairs.join(stations, on="iata", how="anti"))
+        print("Found (origin, iata) pairs with no equivalents in stations.pq.")
+    else:
+        with pl.Config(tbl_rows=500):
+            print(pairs.join(stations, on="iata", how="left").sort("iata"))
+        print(
+            "All origins and destinations (after filters) have a corresponding station."
+        )
 
 
 @app.command()
 def dev():
+    """Some tests wit QGIS"""
     stations = pl.read_parquet("data/stations.pq").select(
         "iata", "lattitude", "longitude", "nom"
     )

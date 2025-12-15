@@ -20,6 +20,15 @@ Le numéro dans le nom du fichier n'a pas de sens particulier et est incrément�
 Les données sont produites par la SNCF, la licence est indiquée sur la [page](https://ressources.data.sncf.com/explore/dataset/tgvmax/information/) du jeu de données.
 Vous en faites ce que vous voulez.
 
+## Nettoyage
+Un certain nombre de trajets concernent des trajets vers l'étranger ou en autocar, d'autres sont mis à jours au cours du mois précédent leur départ et d'autres n'ont tout simplement pas de nom d'origine/destination. Tous ces trajets sont filtrés avec les critères suivants:
+```python
+pl.col(name) != "TBD",
+pl.col(name) != "",
+pl.col(axe) != "AUTOCAR SNCF",
+pl.col(axe) != "INTERNATIONAL",
+``` 
+
 ## TODO
 
 - [x] Convertir les anciennes données en format parquet
