@@ -32,7 +32,7 @@ def scan_files(apply_trip_filters: bool = False) -> pl.LazyFrame:
     """Read and parse all Max Jeune CSV files. Optionally apply filters."""
 
     data = pl.scan_parquet(
-        DATA_FOLDER / "maxjeune" / "*.pq", include_file_paths="file_path"
+        DATA_FOLDER / "maxjeune" / "*.parquet", include_file_paths="file_path"
     ).with_columns(
         has_seat=pl.col("od_happy_card") == "OUI",
         days_to_trip=(pl.col("date") - pl.col("request_date")).dt.total_days(),
@@ -217,12 +217,15 @@ def convert(from_dir: Path, to_dir: Path):
     """Convert and clean data scraped with scrapy to parquet."""
 
     for csv_file in from_dir.glob("*.csv"):
-        pq_file = to_dir / (csv_file.stem + ".pq")
-        pl.read_csv(csv_file, schema_overrides=SCHEMA).with_columns(
-            pl.col("heure_depart").str.to_time("%H:%M"),
-            pl.col("heure_arrivee").str.to_time("%H:%M"),
-        ).drop("_key", "_type").write_parquet(pq_file)
-        print(pl.read_parquet(pq_file))
+        pq_file = to_dir / (csv_file.stem + ".parquet")
+        file_id = int(csv_file.stem)
+
+        if file_id >= 461:
+            pl.read_csv(csv_file, schema_overrides=SCHEMA).with_columns(
+                pl.col("heure_depart").str.to_time("%H:%M"),
+                pl.col("heure_arrivee").str.to_time("%H:%M"),
+            ).drop("_key", "_type").write_parquet(pq_file)
+            print(pl.read_parquet(pq_file))
 
 
 @app.command()
@@ -235,11 +238,11 @@ def download_maxjeune():
     maxjeune_folder = DATA_FOLDER / "maxjeune"
     maxjeune_folder.mkdir(exist_ok=True, parents=True)
 
-    file_numbers = sorted(int(file.stem) for file in maxjeune_folder.glob("*.pq"))
+    file_numbers = sorted(int(file.stem) for file in maxjeune_folder.glob("*.parquet"))
     if len(file_numbers) == 0:
-        next_file = maxjeune_folder / "1.pq"
+        next_file = maxjeune_folder / "1.parquet"
     else:
-        next_file = maxjeune_folder / f"{int(file_numbers[-1]) + 1}.pq"
+        next_file = maxjeune_folder / f"{int(file_numbers[-1]) + 1}.parquet"
 
     data = pl.read_csv(
         MAXJEUNE_DATA_URL, separator=";", schema_overrides=SCHEMA
@@ -269,9 +272,9 @@ def download_aux():
         infer_schema=False,
     ).rename({"sncf_id": "iata"})
 
-    stations.write_parquet(DATA_FOLDER / "stations.pq")
+    stations.write_parquet(DATA_FOLDER / "stations.parquet")
     stations.write_csv(DATA_FOLDER / "stations.csv")
-    print(f"Downloaded station data to {DATA_FOLDER / "stations.pq"}")
+    print(f"Downloaded station data to {DATA_FOLDER / "stations.parquet"}")
 
 
 @app.command()
@@ -384,13 +387,13 @@ def match_iata():
     ############################################################################
     # 3. Match iata to the resarail iata.                                      #
     ############################################################################
-    stations = pl.read_parquet("data/stations.pq").select(
+    stations = pl.read_parquet("data/stations.parquet").select(
         "name", "iata", "latitude", "longitude"
     )
 
     if len(pairs.join(stations, on="iata", how="anti")) > 0:
         print(pairs.join(stations, on="iata", how="anti"))
-        print("Found (origin, iata) pairs with no equivalents in stations.pq.")
+        print("Found (origin, iata) pairs with no equivalents in stations.parquet.")
     else:
         with pl.Config(tbl_rows=500):
             print(pairs.join(stations, on="iata", how="left").sort("iata"))
@@ -402,7 +405,7 @@ def match_iata():
 @app.command()
 def dev():
     """Some tests wit QGIS"""
-    stations = pl.read_parquet("data/stations.pq").select(
+    stations = pl.read_parquet("data/stations.parquet").select(
         "iata", "lattitude", "longitude", "nom"
     )
     # available_seats = (
@@ -469,7 +472,7 @@ def dev():
     trips = (
         (
             scan_files()
-            .filter(file_path="data/maxjeune/432.pq")
+            .filter(file_path="data/maxjeune/432.parquet")
             .group_by("origine_iata", "destination_iata")
             .agg(available=pl.col("has_seat").sum(), total=pl.col("has_seat").len())
             .collect(engine="streaming")
