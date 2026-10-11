@@ -16,7 +16,22 @@ jobs:
     - name: Get the code
       uses: actions/checkout@v4
     - name: Install uv
-      uses: astral-sh/setup-uv@v6
+      uses: astral-sh/setup-uv@v7
+      with:
+        # Cache uv's package/build cache and the managed Python install
+        enable-cache: true
+        cache-python: true
+        cache-dependency-glob: |
+          pyproject.toml
+          uv.lock
+          .python-version
+    - name: Cache the virtual environment
+      uses: actions/cache@v6
+      with:
+        path: .venv
+        key: venv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pyproject.toml', 'uv.lock', '.python-version') }}
+    - name: Install dependencies
+      run: uv sync --locked
     - name: Run the scraper
       run: uv run main.py download-maxjeune
     - name: Update readme
