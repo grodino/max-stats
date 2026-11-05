@@ -52,6 +52,16 @@ def scan_files(apply_trip_filters: bool = False) -> pl.LazyFrame:
     return data
 
 
+def read_remote_csv(url: str, **kwargs) -> pl.DataFrame:
+    """Download a CSV file and read it with ``pl.read_csv(**kwargs)``.
+
+    Since polars 2, ``pl.read_csv(url)`` reads through object-store, which
+    requires a Content-Length header that the SNCF export API does not send.
+    """
+    with urlopen(url) as response:
+        return pl.read_csv(response.read(), **kwargs)
+
+
 def dated_file(folder: Path, request_date: datetime) -> Path:
     """Path of the parquet file holding the data requested at `request_date`.
 
@@ -318,7 +328,7 @@ def download_maxjeune():
     MAXJEUNE_FOLDER.mkdir(exist_ok=True, parents=True)
 
     request_date = datetime.now()
-    data = pl.read_csv(
+    data = read_remote_csv(
         MAXJEUNE_DATA_URL, separator=";", schema_overrides=SCHEMA
     ).with_columns(
         pl.col("heure_depart").str.to_time("%H:%M"),
@@ -335,7 +345,7 @@ def download_maxjeune():
 def download_aux():
     """Download auxiliary data that will be used in the analysis."""
 
-    stations = pl.read_csv(
+    stations = read_remote_csv(
         STATIONS_DATA_URL,
         separator=";",
         schema_overrides={
