@@ -29,6 +29,19 @@ Les paliers ont lieu dans la journée de J-29 (ouverture), J-11 et, depuis débu
 (le maximum, 41 %, est le jour même). Attendre coûte peu : 89 % des trajets disponibles à J-28 le sont encore à J-2, alors que 26 % des 
 trajets indisponibles à J-10 le deviennent à J-2. En 2025, le palier de J-3 n'existait pas (35-36 % de J-11 à J-0).
 
+### Par destination
+
+![Carte de France du meilleur moment pour réserver une place MAXJEUNE, par destination](assets/best_time_map.svg)
+
+`booking_lead_time_table` accepte une expression polars `condition` : les probabilités sont alors calculées pour chaque valeur 
+de l'expression (par exemple `pl.col("destination_iata")` pour une courbe par destination). `uv run main.py best-time-map` 
+(après `uv run main.py download-aux`) en déduit le meilleur moment pour réserver vers chaque destination 
+(`assets/best_time_by_destination.csv`) et colore chaque point de la carte selon la gare de destination la plus proche (à moins de 60 km).
+
+Partout, le meilleur moment est entre J-2 et le jour même (150 destinations à J-0, 30 à J-1, 35 à J-2), 
+et réserver à J-2 n'est jamais à plus de 7 points du meilleur jour (1 point en médiane). Seule exception : Lannemezan (J-5), 
+desservie par la ligne Toulouse - Hendaye, classée `IC SRO` dans les données (sans place MAXJEUNE depuis mai 2026).
+
 ## Format
 
 Les données sont téléchargées au format csv, transformées au format parquet, puis enregistrées dans le dossier `data/maxjeune`.
