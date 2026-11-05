@@ -31,16 +31,19 @@ trajets indisponibles à J-10 le deviennent à J-2. En 2025, le palier de J-3 n'
 
 ### Par destination
 
-![Carte de France du meilleur moment pour réserver une place MAXJEUNE, par destination](assets/best_time_map.svg)
+![Carte de France de la disponibilité moyenne des places MAXJEUNE, par destination](assets/availability_map.svg)
 
 `booking_lead_time_table` accepte une expression polars `condition` : les probabilités sont alors calculées pour chaque valeur 
-de l'expression (par exemple `pl.col("destination_iata")` pour une courbe par destination). `uv run main.py best-time-map` 
-(après `uv run main.py download-aux`) en déduit le meilleur moment pour réserver vers chaque destination 
-(`assets/best_time_by_destination.csv`) et colore chaque point de la carte selon la gare de destination la plus proche (à moins de 60 km). 
+de l'expression (par exemple `pl.col("destination_iata")` pour une courbe par destination). `uv run main.py availability-map` 
+(après `uv run main.py download-aux`) en déduit la disponibilité moyenne des trains vers chaque destination : la part des 
+observations (trajet × jour de requête, de J-30 au jour du départ) avec une place MAXJEUNE (`assets/availability_by_destination.csv`). 
+Chaque point de la carte prend la valeur de la gare de destination la plus proche (à moins de 60 km). 
 La carte utilise tout l'historique (départs dont les 30 jours de réservation ont été observés) ; `--since-march-2026` la limite aux départs depuis mars 2026.
 
-Sur tout l'historique, le meilleur moment est presque partout le jour même (217 destinations sur 261), sinon J-1 (12) ou J-2 (31). 
-Depuis mars 2026, réserver à J-2 n'est jamais à plus de 7 points du meilleur jour (1 point en médiane).
+En moyenne, 24 % des observations ont une place (médiane par destination). Les destinations les plus faciles sont des villes 
+moyennes desservies par des trains qui continuent plus loin (Châlons-en-Champagne 62 %, Vitry-le-François 60 %, Bar-le-Duc 59 %, 
+Montélimar 54 %, Valence 53 %). Les grandes gares parisiennes sont autour de 15-17 % (Bercy 35 %). Les plus difficiles sont 
+l'Ariège (Foix, Ax-les-Thermes : 1 %) et les gares espagnoles (Barcelone, Gérone, Figueres : 0 %).
 
 ### Évolution
 
