@@ -113,6 +113,30 @@ def has_missing_requests():
     }
 
 
+def missing_request_days() -> pl.DataFrame:
+    """Days between the first and last request without any downloaded data."""
+    requested_days = (
+        scan_files()
+        .select(request_date=pl.col("request_date").dt.date())
+        .unique()
+        .collect(engine="streaming")
+    )
+    all_days = pl.DataFrame(
+        {
+            "request_date": pl.date_range(
+                requested_days["request_date"].min(),
+                requested_days["request_date"].max(),
+                interval="1d",
+                eager=True,
+            )
+        }
+    )
+
+    return all_days.join(requested_days, on="request_date", how="anti").sort(
+        "request_date"
+    )
+
+
 def plot_n_trains_availability() -> alt.Chart:
     """Plot the number of available trips in the next 30 days at each request date"""
 
@@ -129,13 +153,15 @@ def plot_n_trains_availability() -> alt.Chart:
     )
 
     alt.renderers.enable("browser")
-    plot = (
-        alt.Chart(
-            n_available_trips,
-            width=400,
-            height=200,
-            title="Historique du nombre de trajets MAXJEUNE et au total, disponibles chaque jour",
-        )
+    color = alt.Color(
+        "variable",
+        scale=alt.Scale(
+            domain=["disponible", "total", "jour manquant"],
+            range=["#4c78a8", "#f58518", "#e45756"],
+        ),
+    ).legend(title=None)
+    lines = (
+        alt.Chart(n_available_trips)
         .mark_line()
         .encode(
             x=alt.X(
@@ -144,7 +170,32 @@ def plot_n_trains_availability() -> alt.Chart:
                 axis=alt.Axis(format="%B %Y"),
             ),
             y=alt.Y("value", title="Nombre de trajets"),
-            color=alt.Color("variable").legend(title=None),
+            color=color,
+        )
+    )
+
+    # Mark the days without any request as red ticks on the x axis
+    missing_ticks = (
+        alt.Chart(
+            missing_request_days().with_columns(
+                variable=pl.lit("jour manquant")
+            )
+        )
+        .mark_tick(thickness=1.5, size=10, opacity=0.8)
+        .encode(
+            x=alt.X("request_date"),
+            y=alt.value(195),
+            color=color,
+        )
+    )
+
+    plot = (
+        alt.layer(
+            lines,
+            missing_ticks,
+            width=400,
+            height=200,
+            title="Historique du nombre de trajets MAXJEUNE et au total, disponibles chaque jour",
         )
         .configure_legend(orient="top")
         .configure_axisX(labelAngle=45)
