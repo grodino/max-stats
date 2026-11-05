@@ -416,9 +416,8 @@ def booking_lead_time_table(
     for True and one for False. The expression should be constant for a given
     train leg (``TRAIN``), otherwise the leg is split between several values.
     """
-    files = sorted(
-        (DATA_FOLDER / "maxjeune").glob("*.parquet"), key=lambda f: int(f.stem)
-    )
+    # Files are named after their request date, so they sort chronologically
+    files = sorted(MAXJEUNE_FOLDER.glob("*.parquet"))
     if split_periods:
         period = (
             pl.when(pl.col("date") >= pl.date(2026, 3, 1))
