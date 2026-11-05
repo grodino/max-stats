@@ -174,17 +174,17 @@ def plot_n_trains_availability() -> alt.Chart:
         )
     )
 
-    # Mark the days without any request as red ticks on the x axis
+    # Mark the days without any request as red dots on the x axis
     missing_ticks = (
         alt.Chart(
             missing_request_days().with_columns(
                 variable=pl.lit("jour manquant")
             )
         )
-        .mark_tick(thickness=1.5, size=10, opacity=0.8)
+        .mark_point(filled=True, size=30, opacity=0.9)
         .encode(
             x=alt.X("request_date"),
-            y=alt.value(195),
+            y=alt.value(200),
             color=color,
         )
     )
