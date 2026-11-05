@@ -587,14 +587,18 @@ def station_coordinates() -> pl.DataFrame:
 
 
 @app.command()
-def best_time_map(
+def availability_map(
     min_observations: int = 20_000,
     max_distance_km: float = 60.0,
     since_march_2026: bool = False,
 ):
-    """Map of France colored by the best time to book a MAXJEUNE seat to
-    each destination, over the full history (default) or only for departures
-    since March 2026 (``--since-march-2026``).
+    """Map of France colored by the average availability of MAXJEUNE seats
+    on trains to each destination, over the full history (default) or only
+    for departures since March 2026 (``--since-march-2026``).
+
+    The average availability of a destination is the share of all its
+    observations (train leg x daily snapshot, every booking day from 30 days
+    before departure to the departure day) that had a MAXJEUNE seat.
 
     Each point of France takes the value of the nearest destination station,
     if one is closer than ``max_distance_km``; farther areas are left blank.
@@ -605,7 +609,7 @@ def best_time_map(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
-    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
     from matplotlib.path import Path as MplPath
 
     table = booking_lead_time_table(
@@ -622,18 +626,21 @@ def best_time_map(
             f"au {requests['requests_end']:%d/%m/%Y}"
         )
     best = (
-        best_booking_time(
-            table.filter(pl.col("period") == period),
-            min_observations=min_observations,
-        )
-        .with_columns(iata=pl.col("condition").replace(IATA_MATCH))
+        table.filter(pl.col("period") == period)
+        .group_by(destination_iata="condition")
+        .agg(available=pl.col("available").sum(), observations=pl.col("total").sum())
+        .with_columns(availability=pl.col("available") / pl.col("observations"))
+        .filter(pl.col("observations") >= min_observations)
+        .with_columns(iata=pl.col("destination_iata").replace(IATA_MATCH))
         .join(station_coordinates(), on="iata", how="left")
     )
     missing = best.filter(pl.col("latitude").is_null())
     if len(missing) > 0:
-        print("No coordinates for", ", ".join(missing["condition"].to_list()))
+        print("No coordinates for", ", ".join(missing["destination_iata"].to_list()))
     best = best.drop_nulls("latitude")
-    best.drop("period").write_csv("assets/best_time_by_destination.csv")
+    best.sort("availability", descending=True).write_csv(
+        "assets/availability_by_destination.csv"
+    )
 
     # France outline, keeping only polygons inside metropolitan France
     geometry = json.loads((DATA_FOLDER / "france.geojson").read_text())["geometry"]
@@ -662,16 +669,14 @@ def best_time_map(
     dy = (points[:, None, 1] - station_xy[None, :, 1]) * km_per_degree
     distance = np.hypot(dx, dy)
     nearest = distance.argmin(axis=1)
-    values = best["best_days_before"].to_numpy()[nearest].astype(float)
+    values = best["availability"].to_numpy()[nearest].astype(float)
     values[(distance.min(axis=1) > max_distance_km) | ~inside] = np.nan
 
-    # Discrete sequential blue ramp: darker = book earlier
-    max_days = int(best["best_days_before"].max())
-    ramp = ["#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
-    n_colors = min(max_days + 1, len(ramp))
-    bounds = list(range(n_colors)) + [max_days + 1]
-    cmap = ListedColormap(ramp[:n_colors])
-    norm = BoundaryNorm([b - 0.5 for b in bounds], cmap.N)
+    # Continuous sequential blue ramp: darker = more seats available
+    cmap = LinearSegmentedColormap.from_list(
+        "blues", ["#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b"]
+    )
+    norm = Normalize(vmin=0, vmax=np.ceil(best["availability"].max() * 10) / 10)
 
     fig, ax = plt.subplots(figsize=(7, 7))
     for path in paths:
@@ -690,7 +695,7 @@ def best_time_map(
     ax.scatter(
         best["longitude"],
         best["latitude"],
-        c=best["best_days_before"],
+        c=best["availability"],
         cmap=cmap,
         norm=norm,
         s=14,
@@ -700,34 +705,31 @@ def best_time_map(
     )
     ax.set_aspect(1 / cos_lat)
     ax.set_axis_off()
-    colorbar = fig.colorbar(
-        image, ax=ax, shrink=0.6, ticks=bounds[:-1] if n_colors > max_days else None
-    )
-    labels = [f"J-{b}" for b in bounds[:-1]]
-    if n_colors <= max_days:
-        labels[-1] = f"J-{bounds[-2]} ou plus"
-        colorbar.set_ticks(bounds[:-1])
-    colorbar.set_ticklabels(labels)
-    colorbar.set_label("Meilleur moment pour réserver (jours avant le départ)")
+    colorbar = fig.colorbar(image, ax=ax, shrink=0.6, format="{x:.0%}")
+    colorbar.set_label("Trains avec une place MAXJEUNE disponible (moyenne)")
     colorbar.outline.set_visible(False)
     ax.set_title(
-        "Meilleur moment pour réserver une place MAXJEUNE, par destination\n"
+        "Disponibilité moyenne des places MAXJEUNE, par destination\n"
         f"({subtitle})",
         fontsize=11,
     )
     ax.text(
         0,
-        0.02,
+        -0.02,
         f"En gris : aucune gare de destination à moins de {max_distance_km:.0f} km\n"
         f"Destinations avec au moins {min_observations:,} observations".replace(",", " "),
         transform=ax.transAxes,
         fontsize=8,
         color="#5f5e5a",
+        verticalalignment="top",
     )
-    fig.savefig("assets/best_time_map.svg", bbox_inches="tight", dpi=150)
+    fig.savefig("assets/availability_map.svg", bbox_inches="tight", dpi=150)
 
-    with pl.Config(tbl_rows=20):
-        print(best["best_days_before"].value_counts(sort=True))
+    names = pl.read_parquet(DATA_FOLDER / "stations.parquet").select("iata", "name").unique("iata")
+    ranked = best.join(names, on="iata", how="left").sort("availability", descending=True)
+    print(best["availability"].describe())
+    print(ranked.select("name", "availability", "observations").head(8))
+    print(ranked.select("name", "availability", "observations").tail(8))
 
 
 @app.command()
