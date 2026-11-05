@@ -8,6 +8,27 @@ Ce jeu de données archive **<span id="n_requested_days">765</span> jours** de r
 
 ![Graphique du nombre de trajets disponible en MAXJEUNE en fonction de la date de réservation](assets/n_available_trips.svg)
 
+## Quand réserver ?
+
+![Probabilité qu'une place MAXJEUNE soit disponible en fonction du nombre de jours avant le départ](assets/booking_lead_time.svg)
+
+Pour chaque trajet (train + origine/destination) et chaque jour de requête, on regarde si une place MAXJEUNE est disponible, 
+puis on calcule la proportion de trajets disponibles en fonction du nombre de jours avant le départ (`uv run main.py booking-lead-time`, 
+résultats dans `assets/booking_lead_time.csv`). Les trains OUIGO, jamais éligibles, sont exclus.
+
+Les places ne partent pas : elles sont **libérées par paliers**. Pour les départs depuis mars 2026 :
+
+| Moment de la recherche | Trajets avec une place |
+|---|---|
+| J-30 (avant l'ouverture) | 0 % |
+| J-28 à J-12 | ~12 % |
+| J-10 à J-4 | ~21-23 % |
+| **J-2 à J-0** | **~40-41 %** |
+
+Les paliers ont lieu dans la journée de J-29 (ouverture), J-11 et, depuis début 2026, J-3. **Le meilleur moment est donc à partir de J-2** 
+(le maximum, 41 %, est le jour même). Attendre coûte peu : 89 % des trajets disponibles à J-28 le sont encore à J-2, alors que 26 % des 
+trajets indisponibles à J-10 le deviennent à J-2. En 2025, le palier de J-3 n'existait pas (35-36 % de J-11 à J-0).
+
 ## Format
 
 Les données sont téléchargées au format csv, transformées au format parquet, puis enregistrées dans le dossier `data/maxjeune`.
