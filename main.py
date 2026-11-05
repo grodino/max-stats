@@ -25,6 +25,8 @@ IATA_MATCH = {"FRPAZ": "FRESB", "FRPNO": "FRCCP"}
 
 app = typer.Typer()
 
+MAXJEUNE_FOLDER = DATA_FOLDER / "maxjeune"
+
 pl.Config.set_tbl_cols(-1)
 
 
@@ -32,7 +34,7 @@ def scan_files(apply_trip_filters: bool = False) -> pl.LazyFrame:
     """Read and parse all Max Jeune CSV files. Optionally apply filters."""
 
     data = pl.scan_parquet(
-        DATA_FOLDER / "maxjeune" / "*.parquet", include_file_paths="file_path"
+        MAXJEUNE_FOLDER / "*.parquet", include_file_paths="file_path"
     ).with_columns(
         has_seat=pl.col("od_happy_card") == "OUI",
         days_to_trip=(pl.col("date") - pl.col("request_date")).dt.total_days(),
@@ -44,6 +46,24 @@ def scan_files(apply_trip_filters: bool = False) -> pl.LazyFrame:
         )
 
     return data
+
+
+def dated_file(folder: Path, request_date: datetime) -> Path:
+    """Path of the parquet file holding the data requested at `request_date`.
+
+    Files are named after the request date (`YYYY-MM-DD.parquet`). If a file
+    already exists for that day (e.g. a delayed scrape that ran after
+    midnight), a suffix is added (`YYYY-MM-DD_2.parquet`, ...) so that no data
+    is overwritten.
+    """
+    stem = request_date.strftime("%Y-%m-%d")
+    path = folder / f"{stem}.parquet"
+    suffix = 2
+    while path.exists():
+        path = folder / f"{stem}_{suffix}.parquet"
+        suffix += 1
+
+    return path
 
 
 def trip_filters(name="name", axe="axe"):
@@ -216,15 +236,20 @@ def plot_n_days_availability() -> alt.Chart:
 def convert(from_dir: Path, to_dir: Path):
     """Convert and clean data scraped with scrapy to parquet."""
 
-    for csv_file in from_dir.glob("*.csv"):
-        pq_file = to_dir / (csv_file.stem + ".parquet")
+    for csv_file in sorted(from_dir.glob("*.csv"), key=lambda f: int(f.stem)):
         file_id = int(csv_file.stem)
 
         if file_id >= 461:
-            pl.read_csv(csv_file, schema_overrides=SCHEMA).with_columns(
-                pl.col("heure_depart").str.to_time("%H:%M"),
-                pl.col("heure_arrivee").str.to_time("%H:%M"),
-            ).drop("_key", "_type").write_parquet(pq_file)
+            data = (
+                pl.read_csv(csv_file, schema_overrides=SCHEMA)
+                .with_columns(
+                    pl.col("heure_depart").str.to_time("%H:%M"),
+                    pl.col("heure_arrivee").str.to_time("%H:%M"),
+                )
+                .drop("_key", "_type")
+            )
+            pq_file = dated_file(to_dir, data["request_date"].min())
+            data.write_parquet(pq_file)
             print(pl.read_parquet(pq_file))
 
 
@@ -235,22 +260,17 @@ def download_maxjeune():
     No checks if already downloaded.
     WARNING: used by CI to scrape every day
     """
-    maxjeune_folder = DATA_FOLDER / "maxjeune"
-    maxjeune_folder.mkdir(exist_ok=True, parents=True)
+    MAXJEUNE_FOLDER.mkdir(exist_ok=True, parents=True)
 
-    file_numbers = sorted(int(file.stem) for file in maxjeune_folder.glob("*.parquet"))
-    if len(file_numbers) == 0:
-        next_file = maxjeune_folder / "1.parquet"
-    else:
-        next_file = maxjeune_folder / f"{int(file_numbers[-1]) + 1}.parquet"
-
+    request_date = datetime.now()
     data = pl.read_csv(
         MAXJEUNE_DATA_URL, separator=";", schema_overrides=SCHEMA
     ).with_columns(
         pl.col("heure_depart").str.to_time("%H:%M"),
         pl.col("heure_arrivee").str.to_time("%H:%M"),
-        request_date=datetime.now(),
+        request_date=request_date,
     )
+    next_file = dated_file(MAXJEUNE_FOLDER, request_date)
     data.write_parquet(next_file)
 
     print(f"File downloaded to {next_file}")
@@ -472,7 +492,7 @@ def dev():
     trips = (
         (
             scan_files()
-            .filter(file_path="data/maxjeune/432.parquet")
+            .filter(file_path=str(MAXJEUNE_FOLDER / "2025-11-16.parquet"))
             .group_by("origine_iata", "destination_iata")
             .agg(available=pl.col("has_seat").sum(), total=pl.col("has_seat").len())
             .collect(engine="streaming")
