@@ -13,8 +13,8 @@ Ce jeu de données archive **<span id="n_requested_days">765</span> jours** de r
 Les données sont téléchargées au format csv, transformées au format parquet, puis enregistrées dans le dossier `data/maxjeune`.
 La description des champs de données est consultable sur la [page](https://ressources.data.sncf.com/explore/dataset/tgvmax/information/) du jeu de données.
 
-Chaque jour les données sont sauvegardées dans le fichier `data/maxjeune/{id}.pq`. 
-Le numéro dans le nom du fichier n'a pas de sens particulier et est incrémenté chaque jour.
+Chaque jour les données sont sauvegardées dans le fichier `data/maxjeune/{YYYY-MM-DD}.parquet`, nommé d'après la date (UTC) de la requête.
+Si plusieurs requêtes ont lieu le même jour (par exemple quand le téléchargement de la veille est retardé après minuit), les fichiers suivants sont suffixés : `{YYYY-MM-DD}_2.parquet`, etc.
 
 ## Réutilisation 
 Les données sont produites par la SNCF, la licence est indiquée sur la [page](https://ressources.data.sncf.com/explore/dataset/tgvmax/information/) du jeu de données.
