@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 import typer
 import polars as pl
 import altair as alt
-from skrub import fuzzy_join, TableReport
 
 MAXJEUNE_DATA_URL = "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/tgvmax/exports/csv"
 STATIONS_DATA_URL = "https://raw.githubusercontent.com/trainline-eu/stations/refs/heads/master/stations.csv"
@@ -25,6 +24,10 @@ TRAIN = [
     "heure_arrivee",
 ]
 IATA_MATCH = {"FRPAZ": "FRESB", "FRPNO": "FRCCP"}
+HAS_SEAT = pl.col("od_happy_card") == "OUI"
+REQUEST_DAY = pl.col("request_date").dt.date()
+# Departure and arrival times are "HH:MM" strings in the raw CSV files
+PARSE_TIMES = pl.col("heure_depart", "heure_arrivee").str.to_time("%H:%M")
 
 
 app = typer.Typer()
@@ -40,13 +43,13 @@ def scan_files(apply_trip_filters: bool = False) -> pl.LazyFrame:
     data = pl.scan_parquet(
         MAXJEUNE_FOLDER / "*.parquet", include_file_paths="file_path"
     ).with_columns(
-        has_seat=pl.col("od_happy_card") == "OUI",
+        has_seat=HAS_SEAT,
         days_to_trip=(pl.col("date") - pl.col("request_date")).dt.total_days(),
     )
 
     if apply_trip_filters:
         data = data.filter(
-            *trip_filters(name="origine"), trip_filters(name="destination")
+            *trip_filters(name="origine"), *trip_filters(name="destination")
         )
 
     return data
@@ -92,62 +95,47 @@ def trip_filters(name="name", axe="axe"):
       remove them.
     """
     return (
-        pl.col(name) != "TBD",
-        pl.col(name) != "",
-        pl.col(axe) != "AUTOCAR SNCF",
-        pl.col(axe) != "INTERNATIONAL",
+        ~pl.col(name).is_in(["TBD", ""]),
+        ~pl.col(axe).is_in(["AUTOCAR SNCF", "INTERNATIONAL"]),
     )
+
+
+def requested_days() -> pl.LazyFrame:
+    """Days (``request_date`` column) with at least one downloaded file."""
+    return scan_files().select(request_date=REQUEST_DAY).unique()
 
 
 def has_missing_requests():
-    """Find requests that are missing in the downloaded data."""
-    requests = (
-        scan_files()
-        .select("file_path", "request_date")
-        .unique(("file_path", "request_date"))
-        .sort("request_date")
+    """Find requests that are missing in the downloaded data.
+
+    ``n_missing_days`` counts the gaps between consecutive requested days.
+    """
+    day = pl.col("request_date")
+    return (
+        requested_days()
+        .select(
+            n_requested_days=pl.len(),
+            n_missing_days=(day.sort().diff().dt.total_days() > 1).sum(),
+            requests_start=day.min(),
+            requests_end=day.max(),
+        )
         .collect(engine="streaming")
+        .row(0, named=True)
     )
-
-    n_missing_days = (
-        requests.select(diff=pl.col("request_date").dt.date().diff().drop_nulls())
-        .filter(pl.col("diff").dt.total_days() > 1)
-        .count()
-        .item()
-    )
-    n_requested_days = requests.n_unique(pl.col("request_date").dt.date())
-    first_day = requests.select(pl.col("request_date").dt.date().min()).item()
-    last_day = requests.select(pl.col("request_date").dt.date().max()).item()
-
-    return {
-        "n_requested_days": n_requested_days,
-        "n_missing_days": n_missing_days,
-        "requests_start": first_day,
-        "requests_end": last_day,
-    }
 
 
 def missing_request_days() -> pl.DataFrame:
     """Days between the first and last request without any downloaded data."""
-    requested_days = (
-        scan_files()
-        .select(request_date=pl.col("request_date").dt.date())
-        .unique()
-        .collect(engine="streaming")
-    )
-    all_days = pl.DataFrame(
-        {
-            "request_date": pl.date_range(
-                requested_days["request_date"].min(),
-                requested_days["request_date"].max(),
-                interval="1d",
-                eager=True,
-            )
-        }
-    )
+    requested = requested_days()
+    day = pl.col("request_date")
 
-    return all_days.join(requested_days, on="request_date", how="anti").sort(
-        "request_date"
+    return (
+        requested.select(
+            request_date=pl.date_range(day.min(), day.max(), interval="1d")
+        )
+        .join(requested, on="request_date", how="anti")
+        .sort("request_date")
+        .collect(engine="streaming")
     )
 
 
@@ -158,12 +146,10 @@ def plot_n_trains_availability() -> alt.Chart:
     n_available_trips = (
         scan_files(apply_trip_filters=True)
         .group_by("request_date")
-        .agg(
-            disponible=(pl.col("has_seat") == True).sum(),  # noqa: E712
-            total=pl.col("has_seat").len(),
-        )
-        .collect(engine="streaming")
+        .agg(disponible=pl.col("has_seat").sum(), total=pl.len())
         .unpivot(on=["disponible", "total"], index="request_date")
+        .sort("variable", "request_date")
+        .collect(engine="streaming")
     )
 
     alt.renderers.enable("browser")
@@ -223,7 +209,7 @@ def describe():
     pprint(scan_files().collect_schema())
     print(
         scan_files()
-        .select(pl.col("axe").unique())
+        .select(pl.col("axe").unique().sort())
         .collect(engine="streaming")
         .to_series()
         .to_list()
@@ -238,35 +224,24 @@ def plot_n_days_availability() -> alt.Chart:
     total and available counts.
     """
 
-    TRAIN = [
-        "date",
-        "train_no",
-        "origine_iata",
-        "destination_iata",
-        "heure_depart",
-        "heure_arrivee",
-    ]
-
     n_available_days = (
         scan_files()
         # In case of trains with multiple carriages, we aggregate the disponibility of seats.
         # .group_by(*TRAIN)
         # .agg(
-        #     disponible=pl.col("request_date").filter(pl.col("has_seat") == True).sum(),
-        #     total=pl.col("has_seat").len(),
+        #     disponible=pl.col("request_date").filter("has_seat").sum(),
+        #     total=pl.len(),
         # )
         .filter(
             pl.col("date") > pl.col("date").min() + pl.duration(days=31),
             pl.col("date") < pl.col("date").max() - pl.duration(days=31),
         )
         .group_by("date")
-        .agg(
-            disponible=pl.col("has_seat").sum(),
-            total=pl.col("has_seat").len(),
-        )
+        .agg(disponible=pl.col("has_seat").sum(), total=pl.len())
         # .agg(pl.col("disponible").mean(), pl.col("total").mean())
-        .collect(engine="streaming")
         .unpivot(on=["disponible", "total"], index="date")
+        .sort("variable", "date")
+        .collect(engine="streaming")
     )
 
     alt.renderers.enable("browser")
@@ -306,12 +281,10 @@ def convert(from_dir: Path, to_dir: Path):
 
         if file_id >= 461:
             data = (
-                pl.read_csv(csv_file, schema_overrides=SCHEMA)
-                .with_columns(
-                    pl.col("heure_depart").str.to_time("%H:%M"),
-                    pl.col("heure_arrivee").str.to_time("%H:%M"),
-                )
+                pl.scan_csv(csv_file, schema_overrides=SCHEMA)
+                .with_columns(PARSE_TIMES)
                 .drop("_key", "_type")
+                .collect()
             )
             pq_file = dated_file(to_dir, data["request_date"].min())
             data.write_parquet(pq_file)
@@ -330,11 +303,7 @@ def download_maxjeune():
     request_date = datetime.now()
     data = read_remote_csv(
         MAXJEUNE_DATA_URL, separator=";", schema_overrides=SCHEMA
-    ).with_columns(
-        pl.col("heure_depart").str.to_time("%H:%M"),
-        pl.col("heure_arrivee").str.to_time("%H:%M"),
-        request_date=request_date,
-    )
+    ).with_columns(PARSE_TIMES, request_date=pl.lit(request_date))
     next_file = dated_file(MAXJEUNE_FOLDER, request_date)
     data.write_parquet(next_file)
 
@@ -426,8 +395,6 @@ def booking_lead_time_table(
     for True and one for False. The expression should be constant for a given
     train leg (``TRAIN``), otherwise the leg is split between several values.
     """
-    # Files are named after their request date, so they sort chronologically
-    files = sorted(MAXJEUNE_FOLDER.glob("*.parquet"))
     if split_periods:
         period = (
             pl.when(pl.col("date") >= pl.date(2026, 3, 1))
@@ -439,60 +406,58 @@ def booking_lead_time_table(
         )
     else:
         first_request, last_request = (
-            pl.scan_parquet(files)
-            .select(
-                pl.col("request_date").min(), pl.col("request_date").max().alias("max")
-            )
-            .collect()
+            scan_files()
+            .select(first=REQUEST_DAY.min(), last=REQUEST_DAY.max())
+            .collect(engine="streaming")
             .row(0)
         )
         period = pl.when(
-            pl.col("date").is_between(
-                first_request.date() + timedelta(days=31), last_request.date()
-            )
+            pl.col("date").is_between(first_request + timedelta(days=31), last_request)
         ).then(pl.lit("Historique complet"))
+
+    booking_day = (
+        pl.col("request_date")
+        .dt.replace_time_zone("UTC")
+        .dt.convert_time_zone("Europe/Paris")
+        + pl.duration(hours=2)
+    ).dt.date()
     keys = ["period", "days_before"]
     if condition is not None:
         keys.append("condition")
 
-    counts = []
-    for file in files:
-        data = pl.scan_parquet(file)
-        if condition is not None:
-            data = data.with_columns(condition=condition)
-        counts.append(
-            data.filter(
+    def snapshot_counts(file: Path) -> pl.DataFrame:
+        """Available and total train legs of one daily snapshot, by ``keys``.
+
+        Each file is one snapshot with a single ``request_date``, so
+        ``period`` and ``days_before`` are constant for a train leg and can be
+        computed before merging its rows. Files are processed one at a time:
+        merging the legs of all snapshots in a single query needs one group
+        per leg and snapshot, which does not fit in memory.
+        """
+        return (
+            pl.scan_parquet(file)
+            .filter(
                 *trip_filters(name="origine"),
                 *trip_filters(name="destination"),
                 ~pl.col("axe").str.starts_with("OUIGO"),
             )
-            .group_by(TRAIN + (["condition"] if condition is not None else []))
-            .agg(
-                has_seat=(pl.col("od_happy_card") == "OUI").any(),
-                request_date=pl.col("request_date").first(),
-            )
             .with_columns(
-                booking_day=(
-                    pl.col("request_date")
-                    .dt.replace_time_zone("UTC")
-                    .dt.convert_time_zone("Europe/Paris")
-                    + pl.duration(hours=2)
-                ).dt.date(),
                 period=period,
-            )
-            .with_columns(
-                days_before=(pl.col("date") - pl.col("booking_day")).dt.total_days()
+                days_before=(pl.col("date") - booking_day).dt.total_days(),
+                **({} if condition is None else {"condition": condition}),
             )
             .filter(pl.col("period").is_not_null(), pl.col("days_before") >= 0)
+            .group_by(*TRAIN, *keys)
+            .agg(has_seat=HAS_SEAT.any())
             .group_by(keys)
             .agg(available=pl.col("has_seat").sum(), total=pl.len())
-            .collect()
+            .collect(engine="streaming")
         )
 
     return (
-        pl.concat(counts)
+        pl.concat(map(snapshot_counts, sorted(MAXJEUNE_FOLDER.glob("*.parquet"))))
         .group_by(keys)
-        .agg(pl.col("available").sum(), pl.col("total").sum())
+        .agg(pl.col("available", "total").sum())
         .with_columns(probability=pl.col("available") / pl.col("total"))
         .sort(keys)
     )
@@ -509,11 +474,10 @@ def booking_lead_time():
     with pl.Config(tbl_rows=100):
         print(table.pivot(on="period", index="days_before", values="probability"))
 
-    for (name,), group in table.group_by("period"):
-        best = group.sort("probability", descending=True).row(0, named=True)
+    for best in best_booking_time(table).iter_rows(named=True):
         print(
-            f"{name}: best time = {best['days_before']} days before departure "
-            f"({best['probability']:.1%} of trains have a MAXJEUNE seat)"
+            f"{best['period']}: best time = {best['best_days_before']} days before "
+            f"departure ({best['best_probability']:.1%} of trains have a MAXJEUNE seat)"
         )
 
     plot = (
@@ -584,15 +548,18 @@ def best_booking_time(
 
 def station_coordinates() -> pl.DataFrame:
     """Latitude and longitude of each MAXJEUNE iata code (from download-aux)."""
-    stations = (
-        pl.read_parquet(DATA_FOLDER / "stations.parquet")
-        .select("iata", "latitude", "longitude", "is_main_station")
+    return (
+        pl.scan_parquet(DATA_FOLDER / "stations.parquet")
         .drop_nulls(["iata", "latitude", "longitude"])
-        .sort("is_main_station", descending=True, nulls_last=True)
-        .unique("iata", keep="first")
-        .drop("is_main_station")
+        .group_by("iata")
+        .agg(
+            # Prefer the main station when several stations share a code
+            pl.col("latitude", "longitude")
+            .sort_by("is_main_station", descending=True, nulls_last=True)
+            .first()
+        )
+        .collect()
     )
-    return stations
 
 
 @app.command()
@@ -646,10 +613,10 @@ def availability_map(
     missing = best.filter(pl.col("latitude").is_null())
     if len(missing) > 0:
         print("No coordinates for", ", ".join(missing["destination_iata"].to_list()))
-    best = best.drop_nulls("latitude")
-    best.sort("availability", descending=True).write_csv(
-        "assets/availability_by_destination.csv"
+    best = best.drop_nulls("latitude").sort(
+        "availability", "destination_iata", descending=[True, False]
     )
+    best.write_csv("assets/availability_by_destination.csv")
 
     # France outline, keeping only polygons inside metropolitan France
     geometry = json.loads((DATA_FOLDER / "france.geojson").read_text())["geometry"]
@@ -734,8 +701,13 @@ def availability_map(
     )
     fig.savefig("assets/availability_map.svg", bbox_inches="tight", dpi=150)
 
-    names = pl.read_parquet(DATA_FOLDER / "stations.parquet").select("iata", "name").unique("iata")
-    ranked = best.join(names, on="iata", how="left").sort("availability", descending=True)
+    names = (
+        pl.scan_parquet(DATA_FOLDER / "stations.parquet")
+        .group_by("iata")
+        .agg(pl.col("name").first())
+        .collect()
+    )
+    ranked = best.join(names, on="iata", how="left", maintain_order="left")
     print(best["availability"].describe())
     print(ranked.select("name", "availability", "observations").head(8))
     print(ranked.select("name", "availability", "observations").tail(8))
@@ -752,15 +724,14 @@ def best_time_evolution(near_best: float = 0.95):
     """
     table = booking_lead_time_table(
         condition=pl.col("date").dt.truncate("1mo"), split_periods=False
-    ).rename({"condition": "month"})
-    best = best_booking_time(
-        table.rename({"month": "condition"}), near_best=near_best
-    ).rename({"condition": "month"})
+    )
+    best = best_booking_time(table, near_best=near_best).rename({"condition": "month"})
+    table = table.rename({"condition": "month"})
     best.drop("period").write_csv("assets/best_time_by_month.csv")
 
-    relative = table.join(best.select("month", "best_probability"), on="month").with_columns(
-        relative=pl.col("probability") / pl.col("best_probability")
-    )
+    relative = table.join(
+        best.select("month", "best_probability"), on="month", maintain_order="left"
+    ).with_columns(relative=pl.col("probability") / pl.col("best_probability"))
     markers = best.select(
         "month",
         pl.col("best_days_before").alias("Meilleur jour"),
@@ -841,34 +812,25 @@ def name_changes():
     during the data collection. This detects those.
     """
 
-    origin_name_changes = (
-        scan_files()
-        .group_by("origine", "origine_iata")
-        .agg()
-        .group_by(iata="origine_iata")
-        .agg(names=pl.col("origine").unique())
-        .filter(pl.col("names").list.len() > 1)
-        .collect(engine="streaming")
-    )
-
-    destination_name_changes = (
-        scan_files()
-        .group_by("destination", "destination_iata")
-        .agg()
-        .group_by(iata="destination_iata")
-        .agg(names=pl.col("destination").unique())
-        .filter(pl.col("names").list.len() > 1)
-        .collect(engine="streaming")
-    )
+    def changes(name: str) -> pl.LazyFrame:
+        return (
+            scan_files()
+            .group_by(iata=f"{name}_iata")
+            .agg(names=pl.col(name).unique())
+            .filter(pl.col("names").list.len() > 1)
+        )
 
     name_changes = (
-        destination_name_changes.join(origin_name_changes, on="iata", how="full")
-        .with_columns(
-            pl.col("names").fill_null(pl.lit([])),
-            pl.col("names_right").fill_null(pl.lit([])),
+        changes("destination")
+        .join(changes("origine"), on="iata", how="full")
+        .select(
+            "iata",
+            names=pl.concat_list(
+                pl.col("names", "names_right").fill_null([])
+            ).list.unique().list.sort(),
         )
-        .with_columns(names=pl.concat_list("names", "names_right").list.unique())
-        .drop("names_right", "iata_right")
+        .sort("iata", "names", nulls_last=True)
+        .collect(engine="streaming")
     )
 
     for change in name_changes.to_dicts():
@@ -887,38 +849,29 @@ def match_iata():
     ############################################################################
     # 1. Collect all (name, iata) from origins and destinations.               #
     ############################################################################
-    origins = (
-        scan_files(apply_trip_filters=True)  # noqa: F821
-        .unique(["origine", "origine_iata"])
-        .select("axe", name="origine", iata="origine_iata")
-        .collect(engine="streaming")
-    )
-    destinations = (
-        scan_files(apply_trip_filters=True)
-        .unique(["destination", "destination_iata"])
-        .select(
-            "axe",
-            name="destination",
-            iata="destination_iata",
-        )
-        .collect(engine="streaming")
-    )
-    pairs: pl.DataFrame = pl.concat([origins, destinations]).unique(["name", "iata"])
+    trips = scan_files(apply_trip_filters=True)
+    pairs = pl.concat(
+        [
+            trips.select("axe", name=pl.col(name), iata=pl.col(f"{name}_iata"))
+            for name in ("origine", "destination")
+        ]
+    ).unique(["name", "iata"])
 
     ############################################################################
     # 2. Filter out (name, iata) pairs that are not relevant for MAXJEUNE.     #
     ############################################################################
-    pairs = pairs.filter(trip_filters())
+    pairs = pairs.filter(*trip_filters()).collect(engine="streaming")
 
     ############################################################################
     # 3. Match iata to the resarail iata.                                      #
     ############################################################################
-    stations = pl.read_parquet("data/stations.parquet").select(
+    stations = pl.read_parquet(DATA_FOLDER / "stations.parquet").select(
         "name", "iata", "latitude", "longitude"
     )
 
-    if len(pairs.join(stations, on="iata", how="anti")) > 0:
-        print(pairs.join(stations, on="iata", how="anti"))
+    unmatched = pairs.join(stations, on="iata", how="anti")
+    if len(unmatched) > 0:
+        print(unmatched)
         print("Found (origin, iata) pairs with no equivalents in stations.parquet.")
     else:
         with pl.Config(tbl_rows=500):
@@ -931,13 +884,13 @@ def match_iata():
 @app.command()
 def dev():
     """Some tests wit QGIS"""
-    stations = pl.read_parquet("data/stations.parquet").select(
+    stations = pl.read_parquet(DATA_FOLDER / "stations.parquet").select(
         "iata", "lattitude", "longitude", "nom"
     )
     # available_seats = (
     #     scan_files()
     #     .group_by("request_date", "origine_iata", "destination_iata")
-    #     .agg(available=pl.col("has_seat").sum(), total=pl.col("has_seat").len())
+    #     .agg(available=pl.col("has_seat").sum(), total=pl.len())
     #     .collect(engine="streaming")
     #     .join(stations, left_on="origine_iata", right_on="iata")
     #     .rename({"lattitude": "origine_lattitude", "longitude": "origine_longitude"})
@@ -949,24 +902,18 @@ def dev():
 
     # FIXME: there are stations in the MAXJEUNE data that are not available in
     # the stations data...
-    tgv_origins = stations.join(
-        scan_files()
-        .select(name=pl.col("origine"), iata=pl.col("origine_iata"))
-        .group_by("name", "iata")
-        .agg()
-        .collect(engine="streaming"),
-        on="iata",
-        how="right",
-    )
-    tgv_destinations = stations.join(
-        scan_files()
-        .select(name=pl.col("destination"), iata=pl.col("destination_iata"))
-        .group_by("name", "iata")
-        .agg()
-        .collect(engine="streaming"),
-        on="iata",
-        how="right",
-    )
+    def tgv_stations_of(name: str) -> pl.DataFrame:
+        return stations.join(
+            scan_files()
+            .select(name=pl.col(name), iata=pl.col(f"{name}_iata"))
+            .unique()
+            .collect(engine="streaming"),
+            on="iata",
+            how="right",
+        )
+
+    tgv_origins = tgv_stations_of("origine")
+    tgv_destinations = tgv_stations_of("destination")
 
     print(
         len(tgv_origins) - len(tgv_origins.drop_nulls()),
@@ -997,10 +944,9 @@ def dev():
 
     trips = (
         (
-            scan_files()
-            .filter(file_path=str(MAXJEUNE_FOLDER / "2025-11-16.parquet"))
+            pl.scan_parquet(MAXJEUNE_FOLDER / "2025-11-16.parquet")
             .group_by("origine_iata", "destination_iata")
-            .agg(available=pl.col("has_seat").sum(), total=pl.col("has_seat").len())
+            .agg(available=HAS_SEAT.sum(), total=pl.len())
             .collect(engine="streaming")
         )
         .join(
