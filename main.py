@@ -378,6 +378,123 @@ def update_readme():
     Path("README.md").write_text(readme_str)
 
 
+def booking_lead_time_table() -> pl.DataFrame:
+    """Probability that a MAXJEUNE seat is available, by days before departure.
+
+    One observation is one train leg (``TRAIN``) seen in one daily snapshot.
+    Duplicated rows of the same leg (several carriages) are merged: the leg has
+    a seat if any of its rows has one. OUIGO trains (never MAXJEUNE-eligible),
+    buses and international trains are dropped.
+
+    The lead time is counted in calendar days (Europe/Paris) between the
+    snapshot and the departure date. Snapshots are taken at night (around
+    23h-3h Paris time), so ``days_before = d`` describes availability at the
+    start of the day, d days before departure. Snapshots are shifted by 2h so
+    that a 23h snapshot counts for the next day.
+
+    Departures are split in two periods because SNCF changed its quota
+    releases at the start of 2026 (new release 3 days before departure).
+    """
+    files = sorted(
+        (DATA_FOLDER / "maxjeune").glob("*.parquet"), key=lambda f: int(f.stem)
+    )
+    period = (
+        pl.when(pl.col("date") >= pl.date(2026, 3, 1))
+        .then(pl.lit("Départs depuis mars 2026"))
+        .when(pl.col("date").is_between(pl.date(2025, 1, 1), pl.date(2025, 12, 14)))
+        .then(pl.lit("Départs en 2025"))
+    )
+    counts = []
+    for file in files:
+        counts.append(
+            pl.scan_parquet(file)
+            .filter(
+                *trip_filters(name="origine"),
+                *trip_filters(name="destination"),
+                ~pl.col("axe").str.starts_with("OUIGO"),
+            )
+            .group_by(TRAIN)
+            .agg(
+                has_seat=(pl.col("od_happy_card") == "OUI").any(),
+                request_date=pl.col("request_date").first(),
+            )
+            .with_columns(
+                booking_day=(
+                    pl.col("request_date")
+                    .dt.replace_time_zone("UTC")
+                    .dt.convert_time_zone("Europe/Paris")
+                    + pl.duration(hours=2)
+                ).dt.date(),
+                period=period,
+            )
+            .with_columns(
+                days_before=(pl.col("date") - pl.col("booking_day")).dt.total_days()
+            )
+            .filter(pl.col("period").is_not_null(), pl.col("days_before") >= 0)
+            .group_by("period", "days_before")
+            .agg(available=pl.col("has_seat").sum(), total=pl.len())
+            .collect()
+        )
+
+    return (
+        pl.concat(counts)
+        .group_by("period", "days_before")
+        .agg(pl.col("available").sum(), pl.col("total").sum())
+        .with_columns(probability=pl.col("available") / pl.col("total"))
+        .sort("period", "days_before")
+    )
+
+
+@app.command()
+def booking_lead_time():
+    """Estimate the best time to book: probability that a MAXJEUNE seat is
+    available as a function of the number of days before departure."""
+
+    table = booking_lead_time_table()
+    table.write_csv("assets/booking_lead_time.csv")
+
+    with pl.Config(tbl_rows=100):
+        print(table.pivot(on="period", index="days_before", values="probability"))
+
+    for (name,), group in table.group_by("period"):
+        best = group.sort("probability", descending=True).row(0, named=True)
+        print(
+            f"{name}: best time = {best['days_before']} days before departure "
+            f"({best['probability']:.1%} of trains have a MAXJEUNE seat)"
+        )
+
+    plot = (
+        alt.Chart(
+            table,
+            width=400,
+            height=200,
+            title="Probabilité qu'une place MAXJEUNE soit disponible",
+        )
+        .mark_line(point=alt.OverlayMarkDef(size=20), strokeWidth=2)
+        .encode(
+            x=alt.X(
+                "days_before",
+                title="Jours avant le départ",
+                scale=alt.Scale(reverse=True, domain=[30, 0]),
+            ),
+            y=alt.Y(
+                "probability",
+                title="Trains avec une place disponible",
+                axis=alt.Axis(format="%"),
+            ),
+            color=alt.Color(
+                "period",
+                scale=alt.Scale(
+                    domain=["Départs depuis mars 2026", "Départs en 2025"],
+                    range=["#2a78d6", "#eb6834"],
+                ),
+            ).legend(title=None),
+        )
+        .configure_legend(orient="top")
+    )
+    plot.save("assets/booking_lead_time.svg")
+
+
 @app.command()
 def name_changes():
     """Print iata codes that have multiple names.
