@@ -3,7 +3,7 @@ import json
 import re
 from urllib.request import urlopen
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import typer
 import polars as pl
@@ -386,7 +386,9 @@ def update_readme():
     Path("README.md").write_text(readme_str)
 
 
-def booking_lead_time_table(condition: pl.Expr | None = None) -> pl.DataFrame:
+def booking_lead_time_table(
+    condition: pl.Expr | None = None, split_periods: bool = True
+) -> pl.DataFrame:
     """Probability that a MAXJEUNE seat is available, by days before departure.
 
     One observation is one train leg (``TRAIN``) seen in one daily snapshot.
@@ -402,8 +404,10 @@ def booking_lead_time_table(condition: pl.Expr | None = None) -> pl.DataFrame:
     start of the day, d days before departure. Snapshots are shifted by 2h so
     that a 23h snapshot counts for the next day.
 
-    Departures are split in two periods because SNCF changed its quota
-    releases at the start of 2026 (new release 3 days before departure).
+    By default, departures are split in two periods because SNCF changed its
+    quota releases at the start of 2026 (new release 3 days before departure).
+    With ``split_periods=False``, all departures whose whole 30-day booking
+    window was observed are pooled in a single "Historique complet" period.
 
     ``condition`` is an optional polars expression evaluated on the raw rows.
     Its value becomes an extra ``condition`` column of the result, so the
@@ -415,12 +419,29 @@ def booking_lead_time_table(condition: pl.Expr | None = None) -> pl.DataFrame:
     files = sorted(
         (DATA_FOLDER / "maxjeune").glob("*.parquet"), key=lambda f: int(f.stem)
     )
-    period = (
-        pl.when(pl.col("date") >= pl.date(2026, 3, 1))
-        .then(pl.lit("Départs depuis mars 2026"))
-        .when(pl.col("date").is_between(pl.date(2025, 1, 1), pl.date(2025, 12, 14)))
-        .then(pl.lit("Départs en 2025"))
-    )
+    if split_periods:
+        period = (
+            pl.when(pl.col("date") >= pl.date(2026, 3, 1))
+            .then(pl.lit("Départs depuis mars 2026"))
+            .when(
+                pl.col("date").is_between(pl.date(2025, 1, 1), pl.date(2025, 12, 14))
+            )
+            .then(pl.lit("Départs en 2025"))
+        )
+    else:
+        first_request, last_request = (
+            pl.scan_parquet(files)
+            .select(
+                pl.col("request_date").min(), pl.col("request_date").max().alias("max")
+            )
+            .collect()
+            .row(0)
+        )
+        period = pl.when(
+            pl.col("date").is_between(
+                first_request.date() + timedelta(days=31), last_request.date()
+            )
+        ).then(pl.lit("Historique complet"))
     keys = ["period", "days_before"]
     if condition is not None:
         keys.append("condition")
@@ -518,13 +539,18 @@ def booking_lead_time():
     plot.save("assets/booking_lead_time.svg")
 
 
-def best_booking_time(table: pl.DataFrame, min_observations: int = 0) -> pl.DataFrame:
+def best_booking_time(
+    table: pl.DataFrame, min_observations: int = 0, near_best: float = 0.95
+) -> pl.DataFrame:
     """Best time to book for each group of a ``booking_lead_time_table``.
 
     The best time is the number of days before departure with the highest
-    probability of finding a seat (ties go to the earliest booking). Groups
-    with fewer than ``min_observations`` observations, or that never have a
-    seat, are dropped.
+    probability of finding a seat (ties go to the earliest booking).
+    ``earliest_near_best_days_before`` is the earliest booking day whose
+    probability is at least ``near_best`` times the best one: when the curve
+    is flat, the best day alone is noisy and this tells from when booking is
+    (almost) as good. Groups with fewer than ``min_observations``
+    observations, or that never have a seat, are dropped.
     """
     keys = [c for c in ("period", "condition") if c in table.columns]
     return (
@@ -534,6 +560,9 @@ def best_booking_time(table: pl.DataFrame, min_observations: int = 0) -> pl.Data
             .sort_by("probability", "days_before", descending=True)
             .first(),
             best_probability=pl.col("probability").max(),
+            earliest_near_best_days_before=pl.col("days_before")
+            .filter(pl.col("probability") >= near_best * pl.col("probability").max())
+            .max(),
             observations=pl.col("total").sum(),
         )
         .filter(
@@ -559,10 +588,13 @@ def station_coordinates() -> pl.DataFrame:
 
 @app.command()
 def best_time_map(
-    min_observations: int = 20_000, max_distance_km: float = 60.0
+    min_observations: int = 20_000,
+    max_distance_km: float = 60.0,
+    since_march_2026: bool = False,
 ):
     """Map of France colored by the best time to book a MAXJEUNE seat to
-    each destination (departures since March 2026).
+    each destination, over the full history (default) or only for departures
+    since March 2026 (``--since-march-2026``).
 
     Each point of France takes the value of the nearest destination station,
     if one is closer than ``max_distance_km``; farther areas are left blank.
@@ -576,10 +608,22 @@ def best_time_map(
     from matplotlib.colors import BoundaryNorm, ListedColormap
     from matplotlib.path import Path as MplPath
 
-    table = booking_lead_time_table(condition=pl.col("destination_iata"))
+    table = booking_lead_time_table(
+        condition=pl.col("destination_iata"), split_periods=since_march_2026
+    )
+    period = "Départs depuis mars 2026" if since_march_2026 else "Historique complet"
+    if since_march_2026:
+        subtitle = "départs depuis mars 2026"
+    else:
+        requests = has_missing_requests()
+        first = requests["requests_start"] + timedelta(days=31)
+        subtitle = (
+            f"historique complet, départs du {first:%d/%m/%Y} "
+            f"au {requests['requests_end']:%d/%m/%Y}"
+        )
     best = (
         best_booking_time(
-            table.filter(pl.col("period") == "Départs depuis mars 2026"),
+            table.filter(pl.col("period") == period),
             min_observations=min_observations,
         )
         .with_columns(iata=pl.col("condition").replace(IATA_MATCH))
@@ -668,7 +712,7 @@ def best_time_map(
     colorbar.outline.set_visible(False)
     ax.set_title(
         "Meilleur moment pour réserver une place MAXJEUNE, par destination\n"
-        "(départs depuis mars 2026)",
+        f"({subtitle})",
         fontsize=11,
     )
     ax.text(
@@ -684,6 +728,98 @@ def best_time_map(
 
     with pl.Config(tbl_rows=20):
         print(best["best_days_before"].value_counts(sort=True))
+
+
+@app.command()
+def best_time_evolution(near_best: float = 0.95):
+    """Plot the evolution of the best day to book, per month of departure.
+
+    Uses the full history (departures whose 30-day booking window was fully
+    observed). The heatmap shows, for each month, the probability of finding a
+    seat at each booking day relative to the month's best day, which removes
+    seasonal variations of the overall level.
+    """
+    table = booking_lead_time_table(
+        condition=pl.col("date").dt.truncate("1mo"), split_periods=False
+    ).rename({"condition": "month"})
+    best = best_booking_time(
+        table.rename({"month": "condition"}), near_best=near_best
+    ).rename({"condition": "month"})
+    best.drop("period").write_csv("assets/best_time_by_month.csv")
+
+    relative = table.join(best.select("month", "best_probability"), on="month").with_columns(
+        relative=pl.col("probability") / pl.col("best_probability")
+    )
+    markers = best.select(
+        "month",
+        pl.col("best_days_before").alias("Meilleur jour"),
+        pl.col("earliest_near_best_days_before").alias(
+            f"Premier jour à {near_best:.0%} du meilleur"
+        ),
+    ).unpivot(index="month", variable_name="marker", value_name="days_before")
+
+    x = alt.X("yearmonth(month):O", title="Mois de départ", axis=alt.Axis(format="%b %y", labelAngle=-45))
+    y = alt.Y(
+        "days_before:O",
+        title="Jours avant le départ",
+        sort="descending",
+        axis=alt.Axis(values=list(range(0, 31, 5))),
+    )
+    heatmap = (
+        alt.Chart(relative)
+        .mark_rect()
+        .encode(
+            x=x,
+            y=y,
+            color=alt.Color(
+                "relative:Q",
+                title="Probabilité / meilleur jour du mois",
+                scale=alt.Scale(
+                    domain=[0, 1],
+                    range=["#f0f6fd", "#9ec5f4", "#3987e5", "#184f95", "#0d366b"],
+                    interpolate="rgb",
+                ),
+                legend=alt.Legend(format="%", orient="right"),
+            ),
+            tooltip=[
+                alt.Tooltip("yearmonth(month):T", title="Mois"),
+                alt.Tooltip("days_before:O", title="Jours avant"),
+                alt.Tooltip("probability:Q", title="Probabilité", format=".1%"),
+                alt.Tooltip("relative:Q", title="/ meilleur jour", format=".0%"),
+            ],
+        )
+    )
+    shape = alt.Shape(
+        "marker:N",
+        title=None,
+        scale=alt.Scale(range=["circle", "square"]),
+        legend=alt.Legend(orient="top", symbolStrokeColor="#eb6834"),
+    )
+    best_points = (
+        alt.Chart(markers)
+        .transform_filter(alt.datum.marker == "Meilleur jour")
+        .mark_point(filled=True, size=40, color="#eb6834", stroke="white", strokeWidth=1)
+        .encode(x=x, y=y, shape=shape)
+    )
+    near_best_points = (
+        alt.Chart(markers)
+        .transform_filter(alt.datum.marker != "Meilleur jour")
+        .mark_point(filled=False, size=110, color="#eb6834", strokeWidth=2)
+        .encode(x=x, y=y, shape=shape)
+    )
+    plot = (
+        alt.layer(heatmap, near_best_points, best_points)
+        .resolve_scale(color="independent")
+        .properties(
+            width=520,
+            height=300,
+            title="Évolution du meilleur moment pour réserver une place MAXJEUNE",
+        )
+    )
+    plot.save("assets/best_time_evolution.svg")
+
+    with pl.Config(tbl_rows=40):
+        print(best.select("month", "best_days_before", "earliest_near_best_days_before", "best_probability"))
 
 
 @app.command()

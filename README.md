@@ -36,11 +36,23 @@ trajets indisponibles à J-10 le deviennent à J-2. En 2025, le palier de J-3 n'
 `booking_lead_time_table` accepte une expression polars `condition` : les probabilités sont alors calculées pour chaque valeur 
 de l'expression (par exemple `pl.col("destination_iata")` pour une courbe par destination). `uv run main.py best-time-map` 
 (après `uv run main.py download-aux`) en déduit le meilleur moment pour réserver vers chaque destination 
-(`assets/best_time_by_destination.csv`) et colore chaque point de la carte selon la gare de destination la plus proche (à moins de 60 km).
+(`assets/best_time_by_destination.csv`) et colore chaque point de la carte selon la gare de destination la plus proche (à moins de 60 km). 
+La carte utilise tout l'historique (départs dont les 30 jours de réservation ont été observés) ; `--since-march-2026` la limite aux départs depuis mars 2026.
 
-Partout, le meilleur moment est entre J-2 et le jour même (150 destinations à J-0, 30 à J-1, 35 à J-2), 
-et réserver à J-2 n'est jamais à plus de 7 points du meilleur jour (1 point en médiane). Seule exception : Lannemezan (J-5), 
-desservie par la ligne Toulouse - Hendaye, classée `IC SRO` dans les données (sans place MAXJEUNE depuis mai 2026).
+Sur tout l'historique, le meilleur moment est presque partout le jour même (217 destinations sur 261), sinon J-1 (12) ou J-2 (31). 
+Depuis mars 2026, réserver à J-2 n'est jamais à plus de 7 points du meilleur jour (1 point en médiane).
+
+### Évolution
+
+![Évolution mensuelle du meilleur moment pour réserver une place MAXJEUNE](assets/best_time_evolution.svg)
+
+`uv run main.py best-time-evolution` calcule la courbe pour chaque mois de départ (`assets/best_time_by_month.csv`). La couleur indique la 
+probabilité de trouver une place rapportée au meilleur jour du mois, ce qui retire les variations saisonnières. Le carré indique le premier 
+jour où l'on atteint 95 % du meilleur jour : le meilleur jour seul est peu fiable quand la courbe est plate.
+
+- **Fin 2024 - début 2025** : la courbe est plate de J-11 à J-0, réserver dès J-11 suffit.
+- **Mi-2025 - fin 2025** : le jour même devient nettement meilleur, il faut attendre J-1 ou J-3.
+- **Depuis début 2026** : une nouvelle libération de places a lieu à J-3, il faut attendre J-2.
 
 ## Format
 
