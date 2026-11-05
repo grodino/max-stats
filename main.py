@@ -1,5 +1,7 @@
 from pprint import pprint
+import json
 import re
+from urllib.request import urlopen
 from pathlib import Path
 from datetime import datetime
 
@@ -10,6 +12,8 @@ from skrub import fuzzy_join, TableReport
 
 MAXJEUNE_DATA_URL = "https://ressources.data.sncf.com/api/explore/v2.1/catalog/datasets/tgvmax/exports/csv"
 STATIONS_DATA_URL = "https://raw.githubusercontent.com/trainline-eu/stations/refs/heads/master/stations.csv"
+# Simplified outline of metropolitan France (IGN Admin Express, Licence Ouverte)
+FRANCE_GEOJSON_URL = "https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/metropole-version-simplifiee.geojson"
 DATA_FOLDER = Path("data")
 SCHEMA = {"date": pl.Date, "request_date": pl.Datetime}
 TRAIN = [
@@ -347,6 +351,10 @@ def download_aux():
     stations.write_csv(DATA_FOLDER / "stations.csv")
     print(f"Downloaded station data to {DATA_FOLDER / "stations.parquet"}")
 
+    with urlopen(FRANCE_GEOJSON_URL) as response:
+        (DATA_FOLDER / "france.geojson").write_bytes(response.read())
+    print(f"Downloaded France outline to {DATA_FOLDER / "france.geojson"}")
+
 
 @app.command()
 def update_readme():
@@ -378,7 +386,7 @@ def update_readme():
     Path("README.md").write_text(readme_str)
 
 
-def booking_lead_time_table() -> pl.DataFrame:
+def booking_lead_time_table(condition: pl.Expr | None = None) -> pl.DataFrame:
     """Probability that a MAXJEUNE seat is available, by days before departure.
 
     One observation is one train leg (``TRAIN``) seen in one daily snapshot.
@@ -396,6 +404,13 @@ def booking_lead_time_table() -> pl.DataFrame:
 
     Departures are split in two periods because SNCF changed its quota
     releases at the start of 2026 (new release 3 days before departure).
+
+    ``condition`` is an optional polars expression evaluated on the raw rows.
+    Its value becomes an extra ``condition`` column of the result, so the
+    probabilities are conditional on it: ``pl.col("destination_iata")`` gives
+    one curve per destination, ``pl.col("axe") == "SUD EST"`` gives one curve
+    for True and one for False. The expression should be constant for a given
+    train leg (``TRAIN``), otherwise the leg is split between several values.
     """
     files = sorted(
         (DATA_FOLDER / "maxjeune").glob("*.parquet"), key=lambda f: int(f.stem)
@@ -406,16 +421,22 @@ def booking_lead_time_table() -> pl.DataFrame:
         .when(pl.col("date").is_between(pl.date(2025, 1, 1), pl.date(2025, 12, 14)))
         .then(pl.lit("Départs en 2025"))
     )
+    keys = ["period", "days_before"]
+    if condition is not None:
+        keys.append("condition")
+
     counts = []
     for file in files:
+        data = pl.scan_parquet(file)
+        if condition is not None:
+            data = data.with_columns(condition=condition)
         counts.append(
-            pl.scan_parquet(file)
-            .filter(
+            data.filter(
                 *trip_filters(name="origine"),
                 *trip_filters(name="destination"),
                 ~pl.col("axe").str.starts_with("OUIGO"),
             )
-            .group_by(TRAIN)
+            .group_by(TRAIN + (["condition"] if condition is not None else []))
             .agg(
                 has_seat=(pl.col("od_happy_card") == "OUI").any(),
                 request_date=pl.col("request_date").first(),
@@ -433,17 +454,17 @@ def booking_lead_time_table() -> pl.DataFrame:
                 days_before=(pl.col("date") - pl.col("booking_day")).dt.total_days()
             )
             .filter(pl.col("period").is_not_null(), pl.col("days_before") >= 0)
-            .group_by("period", "days_before")
+            .group_by(keys)
             .agg(available=pl.col("has_seat").sum(), total=pl.len())
             .collect()
         )
 
     return (
         pl.concat(counts)
-        .group_by("period", "days_before")
+        .group_by(keys)
         .agg(pl.col("available").sum(), pl.col("total").sum())
         .with_columns(probability=pl.col("available") / pl.col("total"))
-        .sort("period", "days_before")
+        .sort(keys)
     )
 
 
@@ -495,6 +516,173 @@ def booking_lead_time():
         .configure_legend(orient="top")
     )
     plot.save("assets/booking_lead_time.svg")
+
+
+def best_booking_time(table: pl.DataFrame, min_observations: int = 0) -> pl.DataFrame:
+    """Best time to book for each group of a ``booking_lead_time_table``.
+
+    The best time is the number of days before departure with the highest
+    probability of finding a seat (ties go to the earliest booking). Groups
+    with fewer than ``min_observations`` observations, or that never have a
+    seat, are dropped.
+    """
+    keys = [c for c in ("period", "condition") if c in table.columns]
+    return (
+        table.group_by(keys)
+        .agg(
+            best_days_before=pl.col("days_before")
+            .sort_by("probability", "days_before", descending=True)
+            .first(),
+            best_probability=pl.col("probability").max(),
+            observations=pl.col("total").sum(),
+        )
+        .filter(
+            pl.col("observations") >= min_observations,
+            pl.col("best_probability") > 0,
+        )
+        .sort(keys)
+    )
+
+
+def station_coordinates() -> pl.DataFrame:
+    """Latitude and longitude of each MAXJEUNE iata code (from download-aux)."""
+    stations = (
+        pl.read_parquet(DATA_FOLDER / "stations.parquet")
+        .select("iata", "latitude", "longitude", "is_main_station")
+        .drop_nulls(["iata", "latitude", "longitude"])
+        .sort("is_main_station", descending=True, nulls_last=True)
+        .unique("iata", keep="first")
+        .drop("is_main_station")
+    )
+    return stations
+
+
+@app.command()
+def best_time_map(
+    min_observations: int = 20_000, max_distance_km: float = 60.0
+):
+    """Map of France colored by the best time to book a MAXJEUNE seat to
+    each destination (departures since March 2026).
+
+    Each point of France takes the value of the nearest destination station,
+    if one is closer than ``max_distance_km``; farther areas are left blank.
+    Requires ``download-aux`` for station coordinates and the France outline.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib.path import Path as MplPath
+
+    table = booking_lead_time_table(condition=pl.col("destination_iata"))
+    best = (
+        best_booking_time(
+            table.filter(pl.col("period") == "Départs depuis mars 2026"),
+            min_observations=min_observations,
+        )
+        .with_columns(iata=pl.col("condition").replace(IATA_MATCH))
+        .join(station_coordinates(), on="iata", how="left")
+    )
+    missing = best.filter(pl.col("latitude").is_null())
+    if len(missing) > 0:
+        print("No coordinates for", ", ".join(missing["condition"].to_list()))
+    best = best.drop_nulls("latitude")
+    best.drop("period").write_csv("assets/best_time_by_destination.csv")
+
+    # France outline, keeping only polygons inside metropolitan France
+    geometry = json.loads((DATA_FOLDER / "france.geojson").read_text())["geometry"]
+    polygons = geometry["coordinates"]
+    if geometry["type"] == "Polygon":
+        polygons = [polygons]
+    paths = [MplPath(np.array(polygon[0])) for polygon in polygons]
+    best = best.filter(
+        pl.col("longitude").is_between(-5.5, 10),
+        pl.col("latitude").is_between(41, 51.5),
+    )
+
+    # Nearest-station raster (equirectangular distances are fine at this scale)
+    lon = np.linspace(-5.3, 9.7, 600)
+    lat = np.linspace(41.2, 51.2, 400)
+    grid_lon, grid_lat = np.meshgrid(lon, lat)
+    points = np.column_stack([grid_lon.ravel(), grid_lat.ravel()])
+    inside = np.zeros(len(points), dtype=bool)
+    for path in paths:
+        inside |= path.contains_points(points)
+
+    km_per_degree = 111.2
+    cos_lat = np.cos(np.radians(46.5))
+    station_xy = best.select("longitude", "latitude").to_numpy()
+    dx = (points[:, None, 0] - station_xy[None, :, 0]) * cos_lat * km_per_degree
+    dy = (points[:, None, 1] - station_xy[None, :, 1]) * km_per_degree
+    distance = np.hypot(dx, dy)
+    nearest = distance.argmin(axis=1)
+    values = best["best_days_before"].to_numpy()[nearest].astype(float)
+    values[(distance.min(axis=1) > max_distance_km) | ~inside] = np.nan
+
+    # Discrete sequential blue ramp: darker = book earlier
+    max_days = int(best["best_days_before"].max())
+    ramp = ["#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+    n_colors = min(max_days + 1, len(ramp))
+    bounds = list(range(n_colors)) + [max_days + 1]
+    cmap = ListedColormap(ramp[:n_colors])
+    norm = BoundaryNorm([b - 0.5 for b in bounds], cmap.N)
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    for path in paths:
+        ax.fill(*path.vertices.T, color="#f0efec", zorder=0)
+        ax.plot(*path.vertices.T, color="#8a8984", linewidth=0.6, zorder=2)
+    image = ax.pcolormesh(
+        grid_lon,
+        grid_lat,
+        values.reshape(grid_lon.shape),
+        cmap=cmap,
+        norm=norm,
+        shading="auto",
+        zorder=1,
+    )
+    ax.scatter(
+        best["longitude"],
+        best["latitude"],
+        c=best["best_days_before"],
+        cmap=cmap,
+        norm=norm,
+        s=14,
+        edgecolors="#3d3d3a",
+        linewidths=0.5,
+        zorder=3,
+    )
+    ax.set_aspect(1 / cos_lat)
+    ax.set_axis_off()
+    colorbar = fig.colorbar(
+        image, ax=ax, shrink=0.6, ticks=bounds[:-1] if n_colors > max_days else None
+    )
+    labels = [f"J-{b}" for b in bounds[:-1]]
+    if n_colors <= max_days:
+        labels[-1] = f"J-{bounds[-2]} ou plus"
+        colorbar.set_ticks(bounds[:-1])
+    colorbar.set_ticklabels(labels)
+    colorbar.set_label("Meilleur moment pour réserver (jours avant le départ)")
+    colorbar.outline.set_visible(False)
+    ax.set_title(
+        "Meilleur moment pour réserver une place MAXJEUNE, par destination\n"
+        "(départs depuis mars 2026)",
+        fontsize=11,
+    )
+    ax.text(
+        0,
+        0.02,
+        f"En gris : aucune gare de destination à moins de {max_distance_km:.0f} km\n"
+        f"Destinations avec au moins {min_observations:,} observations".replace(",", " "),
+        transform=ax.transAxes,
+        fontsize=8,
+        color="#5f5e5a",
+    )
+    fig.savefig("assets/best_time_map.svg", bbox_inches="tight")
+
+    with pl.Config(tbl_rows=20):
+        print(best["best_days_before"].value_counts(sort=True))
 
 
 @app.command()
