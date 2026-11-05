@@ -14,7 +14,7 @@ Ce jeu de données archive **<span id="n_requested_days">765</span> jours** de r
 
 Pour chaque trajet (train + origine/destination) et chaque jour de requête, on regarde si une place MAXJEUNE est disponible, 
 puis on calcule la proportion de trajets disponibles en fonction du nombre de jours avant le départ (`uv run main.py booking-lead-time`, 
-résultats dans `assets/booking_lead_time.csv`). Les trains OUIGO, jamais éligibles, sont exclus.
+résultats dans `assets/booking_lead_time.csv`). Les trains OUIGO sont exclus : ils sont toujours indiqués sans place MAXJEUNE dans ce jeu de données (nov. 2024 - oct. 2026) et n'y figurent plus depuis mi-octobre 2026, donc les données ne disent rien de leur disponibilité réelle.
 
 Les places ne partent pas : elles sont **libérées par paliers**. Pour les départs depuis mars 2026 :
 

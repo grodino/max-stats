@@ -383,8 +383,10 @@ def booking_lead_time_table() -> pl.DataFrame:
 
     One observation is one train leg (``TRAIN``) seen in one daily snapshot.
     Duplicated rows of the same leg (several carriages) are merged: the leg has
-    a seat if any of its rows has one. OUIGO trains (never MAXJEUNE-eligible),
-    buses and international trains are dropped.
+    a seat if any of its rows has one. Buses and international trains are
+    dropped, and so are OUIGO trains: the dataset always lists them without a
+    MAXJEUNE seat (Nov. 2024 - Oct. 2026) and stopped listing them in mid-October
+    2026, so it says nothing about their real availability.
 
     The lead time is counted in calendar days (Europe/Paris) between the
     snapshot and the departure date. Snapshots are taken at night (around
