@@ -641,6 +641,7 @@ def best_time_map(
         norm=norm,
         shading="auto",
         zorder=1,
+        rasterized=True,  # keeps the SVG small (one image instead of 240k cells)
     )
     ax.scatter(
         best["longitude"],
@@ -679,7 +680,7 @@ def best_time_map(
         fontsize=8,
         color="#5f5e5a",
     )
-    fig.savefig("assets/best_time_map.svg", bbox_inches="tight")
+    fig.savefig("assets/best_time_map.svg", bbox_inches="tight", dpi=150)
 
     with pl.Config(tbl_rows=20):
         print(best["best_days_before"].value_counts(sort=True))
