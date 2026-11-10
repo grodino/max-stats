@@ -569,6 +569,12 @@ HUBS = {
     "Montpellier": ["MONTPELLIER SAINT ROCH", "MONTPELLIER SUD DE FRANCE"],
 }
 PERIODS = {"2026": "Départs depuis mars 2026", "2025": "Départs en 2025"}
+# Day of departure: Monday-Friday or Saturday-Sunday
+DAY_TYPE = (
+    pl.when(pl.col("date").dt.weekday() >= 6)
+    .then(pl.lit("Week-end"))
+    .otherwise(pl.lit("Semaine"))
+)
 
 
 def hub_of(name: str) -> pl.Expr:
@@ -579,8 +585,9 @@ def hub_of(name: str) -> pl.Expr:
 
 
 def hub_lead_time_table(period: str) -> pl.DataFrame:
-    """Number of trips with a MAXJEUNE seat by hub, direction and days before
-    departure: mean and standard deviation over the departure dates.
+    """Number of trips with a MAXJEUNE seat by hub, direction, day of
+    departure (``DAY_TYPE``: weekday or weekend) and days before departure:
+    mean and standard deviation over the departure dates.
 
     A trip is a train leg (``TRAIN``) whose origin (direction "Départs") or
     destination ("Arrivées") is a station of the hub; legs within one hub
@@ -629,7 +636,8 @@ def hub_lead_time_table(period: str) -> pl.DataFrame:
         .with_columns(amount=pl.col("available") / pl.col("snapshots"))
     )
     return (
-        by_date.group_by("hub", "direction", "days_before")
+        by_date.with_columns(day_type=DAY_TYPE)
+        .group_by("hub", "direction", "day_type", "days_before")
         .agg(
             mean=pl.col("amount").mean(),
             std=pl.col("amount").std(),
@@ -639,8 +647,35 @@ def hub_lead_time_table(period: str) -> pl.DataFrame:
             lower=(pl.col("mean") - pl.col("std")).clip(lower_bound=0),
             upper=pl.col("mean") + pl.col("std"),
         )
-        .sort("hub", "direction", "days_before")
+        .sort("hub", "direction", "day_type", "days_before")
     )
+
+
+def hub_explorer_data(period: str = "2026") -> dict:
+    """``hub_lead_time_table`` as nested lists for the trip explorer page:
+    series[hub][direction][day_type] = {mean, lower, upper, std} indexed by
+    days before departure (0-30), plus the number of departure dates."""
+    table = hub_lead_time_table(period)
+    series: dict = {}
+    for (hub, direction, day_type), group in table.group_by(
+        "hub", "direction", "day_type"
+    ):
+        by_day = {row["days_before"]: row for row in group.iter_rows(named=True)}
+
+        def values(column: str) -> list:
+            return [
+                None if by_day.get(d, {}).get(column) is None else round(by_day[d][column], 2)
+                for d in range(31)
+            ]
+
+        series.setdefault(hub, {}).setdefault(direction, {})[day_type] = {
+            "mean": values("mean"),
+            "std": values("std"),
+            "lower": values("lower"),
+            "upper": values("upper"),
+            "departure_dates": group["departure_dates"].max(),
+        }
+    return {"period": PERIODS[period], "hubs": [h for h in HUBS if h in series], "series": series}
 
 
 @app.command()
@@ -664,13 +699,14 @@ def booking_lead_time(
 
     best = (
         table.sort("mean", "days_before", descending=True)
-        .group_by("hub", "direction", maintain_order=True)
+        .group_by("hub", "direction", "day_type", maintain_order=True)
         .first()
-        .sort("hub", "direction")
+        .sort("hub", "direction", "day_type")
     )
     for row in best.iter_rows(named=True):
         print(
-            f"{row['hub']:<12} {row['direction']:<9} best time = {row['days_before']:>2} days "
+            f"{row['hub']:<12} {row['direction']:<9} {row['day_type']:<9} "
+            f"best time = {row['days_before']:>2} days "
             f"before departure ({row['mean']:.1f} ± {row['std']:.1f} trips with a seat, "
             f"{row['departure_dates']} departure dates)"
         )
@@ -678,9 +714,9 @@ def booking_lead_time(
     labels = {"Départs": "Départs de la ville", "Arrivées": "Arrivées dans la ville"}
     data = table.with_columns(direction=pl.col("direction").replace_strict(labels))
     color = alt.Color(
-        "direction:N",
-        title=None,
-        scale=alt.Scale(domain=list(labels.values()), range=[THEME["main"], THEME["accent"]]),
+        "day_type:N",
+        title="Jour de départ",
+        scale=alt.Scale(domain=["Semaine", "Week-end"], range=[THEME["main"], THEME["accent"]]),
     )
     x = alt.X(
         "days_before:Q",
@@ -695,7 +731,7 @@ def booking_lead_time(
         y=alt.Y("mean:Q", title="Trajets avec une place"),
         color=color,
         tooltip=[
-            alt.Tooltip("direction:N", title="Sens"),
+            alt.Tooltip("day_type:N", title="Jour de départ"),
             alt.Tooltip("days_before:Q", title="Jours avant"),
             alt.Tooltip("mean:Q", title="Moyenne", format=".1f"),
             alt.Tooltip("std:Q", title="Écart-type", format=".1f"),
@@ -703,17 +739,19 @@ def booking_lead_time(
     )
     plot = (
         alt.layer(band, line, data=data)
-        .properties(width=280, height=140)
+        .properties(width=260, height=120)
         .facet(
-            facet=alt.Facet("hub:N", title=None, sort=list(HUBS), header=alt.Header(labelFontSize=12)),
-            columns=2,
+            row=alt.Row("hub:N", title=None, sort=list(HUBS), header=alt.Header(labelFontSize=12)),
+            column=alt.Column(
+                "direction:N", title=None, sort=list(labels.values()), header=alt.Header(labelFontSize=12)
+            ),
         )
         .resolve_scale(y="independent")
         .properties(
             title=alt.Title(
                 "Trajets avec une place MAXJEUNE selon le jour de réservation",
-                subtitle=f"{PERIODS[period]} · moyenne par jour de départ, "
-                "zone : ± un écart-type · échelles différentes par ville",
+                subtitle=f"{PERIODS[period]} · semaine : lundi-vendredi, week-end : samedi-dimanche · "
+                "moyenne par jour de départ, zone : ± un écart-type · échelles différentes par ville",
             )
         )
     )
@@ -1204,6 +1242,7 @@ def trip_explorer(
     for trip, label, distance in zip(data["trips"], clusters["labels"], clusters["distance"]):
         trip["cluster"] = label
         trip["cluster_distance"] = distance
+    data["hubs"] = hub_explorer_data("2026")
     data["clusters"] = {
         "k": k,
         "silhouette": clusters["silhouette"],
