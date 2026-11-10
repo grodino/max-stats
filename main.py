@@ -33,8 +33,83 @@ PARSE_TIMES = pl.col("heure_depart", "heure_arrivee").str.to_time("%H:%M")
 app = typer.Typer()
 
 MAXJEUNE_FOLDER = DATA_FOLDER / "maxjeune"
+# Tables computed by the analysis commands (not versioned)
+GENERATED_FOLDER = DATA_FOLDER / "generated"
 
 pl.Config.set_tbl_cols(-1)
+
+# Color scheme shared by all the figures: a sequential ramp of a single hue
+# (light to dark, for heatmaps and maps), a step of that ramp as the main
+# series color, a gray for context series and an accent hue for highlighted
+# marks.
+THEME = {
+    "ramp": ["#eef4fb", "#c6dbf2", "#8fb8e6", "#4f8fd2", "#2266b0", "#0b3a75"],
+    "main": "#2266b0",
+    "context": "#9aa1ab",
+    "accent": "#e8662a",
+}
+# Neutral colors, shared by all schemes
+INK = "#1f2328"  # titles
+MUTED = "#57606a"  # labels, notes
+GRID = "#e6e8eb"
+NO_DATA = "#eceae6"  # land without data on the map
+BORDER = "#8c8a85"
+FONT = "Helvetica Neue, Helvetica, Arial, Liberation Sans, sans-serif"
+
+
+@alt.theme.register("max_stats", enable=True)
+def altair_theme() -> alt.theme.ThemeConfig:
+    """Altair style of all the figures (reads `THEME` when a chart is saved)."""
+    return {
+        "config": {
+            "background": "white",
+            "font": FONT,
+            "view": {"stroke": None},
+            "title": {
+                "color": INK,
+                "fontSize": 14,
+                "fontWeight": 600,
+                "anchor": "start",
+                "offset": 12,
+            },
+            "axis": {
+                "labelColor": MUTED,
+                "labelFontSize": 11,
+                "titleColor": MUTED,
+                "titleFontSize": 11,
+                "titleFontWeight": "normal",
+                "gridColor": GRID,
+                "domainColor": BORDER,
+                "tickColor": BORDER,
+            },
+            "legend": {
+                "orient": "top",
+                "labelColor": INK,
+                "labelFontSize": 11,
+                "titleColor": MUTED,
+                "titleFontSize": 11,
+                "titleFontWeight": "normal",
+            },
+            "range": {"category": [THEME["main"], THEME["context"], THEME["accent"]]},
+        }
+    }
+
+
+def matplotlib_style() -> dict:
+    """Matplotlib rcParams matching `altair_theme`."""
+    return {
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Helvetica Neue", "Helvetica", "Arial", "Liberation Sans", "DejaVu Sans"],
+        "text.color": INK,
+        "axes.titlecolor": INK,
+        "axes.titlesize": 12,
+        "axes.titleweight": 600,
+        "axes.labelcolor": MUTED,
+        "xtick.color": MUTED,
+        "ytick.color": MUTED,
+        "xtick.labelcolor": MUTED,
+        "ytick.labelcolor": MUTED,
+    }
 
 
 def scan_files(apply_trip_filters: bool = False) -> pl.LazyFrame:
@@ -63,6 +138,12 @@ def read_remote_csv(url: str, **kwargs) -> pl.DataFrame:
     """
     with urlopen(url) as response:
         return pl.read_csv(response.read(), **kwargs)
+
+
+def generated_file(name: str) -> Path:
+    """Path of a generated table in `GENERATED_FOLDER`, creating the folder."""
+    GENERATED_FOLDER.mkdir(parents=True, exist_ok=True)
+    return GENERATED_FOLDER / name
 
 
 def dated_file(folder: Path, request_date: datetime) -> Path:
@@ -157,7 +238,7 @@ def plot_n_trains_availability() -> alt.Chart:
         "variable",
         scale=alt.Scale(
             domain=["disponible", "total", "jour manquant"],
-            range=["#4c78a8", "#f58518", "#e45756"],
+            range=[THEME["main"], THEME["context"], THEME["accent"]],
         ),
     ).legend(title=None)
     lines = (
@@ -197,7 +278,6 @@ def plot_n_trains_availability() -> alt.Chart:
             height=200,
             title="Historique du nombre de trajets MAXJEUNE et au total, disponibles chaque jour",
         )
-        .configure_legend(orient="top")
         .configure_axisX(labelAngle=45)
     )
 
@@ -350,17 +430,16 @@ def update_readme():
     readme_str = Path("README.md").read_text()
 
     for variable, value in has_missing_requests().items():
-        to_replace = re.search(rf'<span id="{variable}">[^<]*<\/span>', readme_str)[0]
-
         if isinstance(value, datetime):
             value = value.strftime("%Y/%m/%d")
-        else:
-            value = str(value)
 
-        # Add the html around it
-        value = f'<span id="{variable}">{value}</span>'
-
-        readme_str = readme_str.replace(to_replace, value)
+        readme_str, n_replaced = re.subn(
+            rf'<span id="{variable}">[^<]*</span>',
+            f'<span id="{variable}">{value}</span>',
+            readme_str,
+        )
+        if n_replaced == 0:
+            raise ValueError(f'No <span id="{variable}"> in README.md')
 
     Path("README.md").write_text(readme_str)
 
@@ -469,7 +548,7 @@ def booking_lead_time():
     available as a function of the number of days before departure."""
 
     table = booking_lead_time_table()
-    table.write_csv("assets/booking_lead_time.csv")
+    table.write_csv(generated_file("booking_lead_time.csv"))
 
     with pl.Config(tbl_rows=100):
         print(table.pivot(on="period", index="days_before", values="probability"))
@@ -503,27 +582,24 @@ def booking_lead_time():
                 "period",
                 scale=alt.Scale(
                     domain=["Départs depuis mars 2026", "Départs en 2025"],
-                    range=["#2a78d6", "#eb6834"],
+                    range=[THEME["main"], THEME["context"]],
                 ),
             ).legend(title=None),
         )
-        .configure_legend(orient="top")
     )
     plot.save("assets/booking_lead_time.svg")
 
 
-def best_booking_time(
-    table: pl.DataFrame, min_observations: int = 0, near_best: float = 0.95
-) -> pl.DataFrame:
+def best_booking_time(table: pl.DataFrame, min_observations: int = 0) -> pl.DataFrame:
     """Best time to book for each group of a ``booking_lead_time_table``.
 
     The best time is the number of days before departure with the highest
     probability of finding a seat (ties go to the earliest booking).
-    ``earliest_near_best_days_before`` is the earliest booking day whose
-    probability is at least ``near_best`` times the best one: when the curve
-    is flat, the best day alone is noisy and this tells from when booking is
-    (almost) as good. Groups with fewer than ``min_observations``
-    observations, or that never have a seat, are dropped.
+    ``second_best_days_before`` is the day with the second highest
+    probability: when the curve is flat, the best day alone is noisy and the
+    second best one tells how far apart the good days are. Groups with fewer
+    than ``min_observations`` observations, or that never have a seat, are
+    dropped.
     """
     keys = [c for c in ("period", "condition") if c in table.columns]
     return (
@@ -533,9 +609,9 @@ def best_booking_time(
             .sort_by("probability", "days_before", descending=True)
             .first(),
             best_probability=pl.col("probability").max(),
-            earliest_near_best_days_before=pl.col("days_before")
-            .filter(pl.col("probability") >= near_best * pl.col("probability").max())
-            .max(),
+            second_best_days_before=pl.col("days_before")
+            .sort_by("probability", "days_before", descending=True)
+            .get(1, null_on_oob=True),
             observations=pl.col("total").sum(),
         )
         .filter(
@@ -616,7 +692,7 @@ def availability_map(
     best = best.drop_nulls("latitude").sort(
         "availability", "destination_iata", descending=[True, False]
     )
-    best.write_csv("assets/availability_by_destination.csv")
+    best.write_csv(generated_file("availability_by_destination.csv"))
 
     # France outline, keeping only polygons inside metropolitan France
     geometry = json.loads((DATA_FOLDER / "france.geojson").read_text())["geometry"]
@@ -648,16 +724,15 @@ def availability_map(
     values = best["availability"].to_numpy()[nearest].astype(float)
     values[(distance.min(axis=1) > max_distance_km) | ~inside] = np.nan
 
-    # Continuous sequential blue ramp: darker = more seats available
-    cmap = LinearSegmentedColormap.from_list(
-        "blues", ["#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b"]
-    )
+    # Continuous sequential ramp: darker = more seats available
+    cmap = LinearSegmentedColormap.from_list("ramp", THEME["ramp"])
     norm = Normalize(vmin=0, vmax=np.ceil(best["availability"].max() * 10) / 10)
 
+    plt.rcParams.update(matplotlib_style())
     fig, ax = plt.subplots(figsize=(7, 7))
     for path in paths:
-        ax.fill(*path.vertices.T, color="#f0efec", zorder=0)
-        ax.plot(*path.vertices.T, color="#8a8984", linewidth=0.6, zorder=2)
+        ax.fill(*path.vertices.T, color=NO_DATA, zorder=0)
+        ax.plot(*path.vertices.T, color=BORDER, linewidth=0.6, zorder=2)
     image = ax.pcolormesh(
         grid_lon,
         grid_lat,
@@ -675,7 +750,7 @@ def availability_map(
         cmap=cmap,
         norm=norm,
         s=14,
-        edgecolors="#3d3d3a",
+        edgecolors=INK,
         linewidths=0.5,
         zorder=3,
     )
@@ -684,10 +759,11 @@ def availability_map(
     colorbar = fig.colorbar(image, ax=ax, shrink=0.6, format="{x:.0%}")
     colorbar.set_label("Trains avec une place MAXJEUNE disponible (moyenne)")
     colorbar.outline.set_visible(False)
+    colorbar.ax.tick_params(length=0)
     ax.set_title(
         "Disponibilité moyenne des places MAXJEUNE, par destination\n"
         f"({subtitle})",
-        fontsize=11,
+        loc="left",
     )
     ax.text(
         0,
@@ -696,7 +772,7 @@ def availability_map(
         f"Destinations avec au moins {min_observations:,} observations".replace(",", " "),
         transform=ax.transAxes,
         fontsize=8,
-        color="#5f5e5a",
+        color=MUTED,
         verticalalignment="top",
     )
     fig.savefig("assets/availability_map.svg", bbox_inches="tight", dpi=150)
@@ -714,7 +790,7 @@ def availability_map(
 
 
 @app.command()
-def best_time_evolution(near_best: float = 0.95):
+def best_time_evolution():
     """Plot the evolution of the best day to book, per month of departure.
 
     Uses the full history (departures whose 30-day booking window was fully
@@ -725,9 +801,9 @@ def best_time_evolution(near_best: float = 0.95):
     table = booking_lead_time_table(
         condition=pl.col("date").dt.truncate("1mo"), split_periods=False
     )
-    best = best_booking_time(table, near_best=near_best).rename({"condition": "month"})
+    best = best_booking_time(table).rename({"condition": "month"})
     table = table.rename({"condition": "month"})
-    best.drop("period").write_csv("assets/best_time_by_month.csv")
+    best.drop("period").write_csv(generated_file("best_time_by_month.csv"))
 
     relative = table.join(
         best.select("month", "best_probability"), on="month", maintain_order="left"
@@ -735,9 +811,7 @@ def best_time_evolution(near_best: float = 0.95):
     markers = best.select(
         "month",
         pl.col("best_days_before").alias("Meilleur jour"),
-        pl.col("earliest_near_best_days_before").alias(
-            f"Premier jour à {near_best:.0%} du meilleur"
-        ),
+        pl.col("second_best_days_before").alias("Deuxième meilleur jour"),
     ).unpivot(index="month", variable_name="marker", value_name="days_before")
 
     x = alt.X("yearmonth(month):O", title="Mois de départ", axis=alt.Axis(format="%b %y", labelAngle=-45))
@@ -756,12 +830,14 @@ def best_time_evolution(near_best: float = 0.95):
             color=alt.Color(
                 "relative:Q",
                 title="Probabilité / meilleur jour du mois",
+                # Half of the cells are below 50% of the best day: spend the
+                # color steps on the region near the optimum instead
                 scale=alt.Scale(
-                    domain=[0, 1],
-                    range=["#f0f6fd", "#9ec5f4", "#3987e5", "#184f95", "#0d366b"],
-                    interpolate="rgb",
+                    type="threshold",
+                    domain=[0.5, 0.7, 0.8, 0.9, 0.95],
+                    range=THEME["ramp"],
                 ),
-                legend=alt.Legend(format="%", orient="right"),
+                legend=alt.Legend(format=".0%", orient="right"),
             ),
             tooltip=[
                 alt.Tooltip("yearmonth(month):T", title="Mois"),
@@ -774,23 +850,25 @@ def best_time_evolution(near_best: float = 0.95):
     shape = alt.Shape(
         "marker:N",
         title=None,
-        scale=alt.Scale(range=["circle", "square"]),
-        legend=alt.Legend(orient="top", symbolStrokeColor="#eb6834"),
+        scale=alt.Scale(
+            domain=["Meilleur jour", "Deuxième meilleur jour"], range=["circle", "square"]
+        ),
+        legend=alt.Legend(orient="top", symbolStrokeColor=THEME["accent"]),
     )
     best_points = (
         alt.Chart(markers)
         .transform_filter(alt.datum.marker == "Meilleur jour")
-        .mark_point(filled=True, size=40, color="#eb6834", stroke="white", strokeWidth=1)
+        .mark_point(filled=True, size=40, color=THEME["accent"], stroke="white", strokeWidth=1)
         .encode(x=x, y=y, shape=shape)
     )
-    near_best_points = (
+    second_best_points = (
         alt.Chart(markers)
         .transform_filter(alt.datum.marker != "Meilleur jour")
-        .mark_point(filled=False, size=110, color="#eb6834", strokeWidth=2)
+        .mark_point(filled=False, size=110, color=THEME["accent"], strokeWidth=2)
         .encode(x=x, y=y, shape=shape)
     )
     plot = (
-        alt.layer(heatmap, near_best_points, best_points)
+        alt.layer(heatmap, second_best_points, best_points)
         .resolve_scale(color="independent")
         .properties(
             width=520,
@@ -801,7 +879,7 @@ def best_time_evolution(near_best: float = 0.95):
     plot.save("assets/best_time_evolution.svg")
 
     with pl.Config(tbl_rows=40):
-        print(best.select("month", "best_days_before", "earliest_near_best_days_before", "best_probability"))
+        print(best.select("month", "best_days_before", "second_best_days_before", "best_probability"))
 
 
 @app.command()
