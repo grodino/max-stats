@@ -1065,24 +1065,39 @@ def trip_explorer_data(n_trips: int) -> dict:
 @app.command()
 def trip_explorer(
     n_trips: int = typer.Option(100, help="Number of trips to include."),
+    k: int = typer.Option(4, help="Number of trip groups (see cluster-trips)."),
+    seed: int = typer.Option(0, help="Random seed of k-means."),
     output: Path = typer.Option(
         GENERATED_FOLDER / "trip_explorer.html", help="HTML page to write."
     ),
 ):
     """Interactive page to pick a trip and see the evolution of its best day
-    to book (same heatmap as ``best-time-evolution --origin --destination``).
+    to book (same heatmap as ``best-time-evolution --origin --destination``),
+    and to browse the groups of trips found by ``cluster-trips``.
 
     Trips are listed by number of available MAXJEUNE seats. The page is
     ``templates/trip_explorer.html`` with the data embedded.
     """
     data = trip_explorer_data(n_trips)
+    clusters = cluster_trip_data(data, k=k, seed=seed)
+    for trip, label, distance in zip(data["trips"], clusters["labels"], clusters["distance"]):
+        trip["cluster"] = label
+        trip["cluster_distance"] = distance
+    data["clusters"] = {
+        "k": k,
+        "silhouette": clusters["silhouette"],
+        "barycenters": clusters["barycenters"],
+    }
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     page = Path("templates/trip_explorer.html").read_text().replace(
         "__TRIP_DATA__", payload.replace("</", "<\\/")
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(page)
-    print(f"{len(data['trips'])} trips, page written to {output} ({len(page) / 1e6:.1f} MB)")
+    print(
+        f"{len(data['trips'])} trips in {k} groups (silhouette "
+        f"{clusters['silhouette']:.2f}), page written to {output} ({len(page) / 1e6:.1f} MB)"
+    )
 
 
 def wasserstein_embedding(probability: list[list[float | None]], levels: int):
@@ -1120,6 +1135,67 @@ def wasserstein_embedding(probability: list[list[float | None]], levels: int):
     return quantiles.ravel() / np.sqrt(quantiles.size), int((~observed).sum())
 
 
+def quantiles_to_distribution(quantiles, n_days: int = 31):
+    """Distribution over the booking days of evenly spaced quantiles.
+
+    Barycenter quantiles fall between days: each one is split between the two
+    nearest days (linear interpolation), which avoids the stripes of a plain
+    histogram.
+    """
+    import numpy as np
+
+    q = np.clip(quantiles, 0, n_days - 1)
+    low = np.floor(q).astype(int)
+    frac = q - low
+    high = np.minimum(low + 1, n_days - 1)
+    share = np.zeros(n_days)
+    np.add.at(share, low, 1 - frac)
+    np.add.at(share, high, frac)
+    return share / len(q)
+
+
+def cluster_trip_data(data: dict, k: int, levels: int = 100, seed: int = 0) -> dict:
+    """k-means of the trips of ``trip_explorer_data`` with the Wasserstein-2
+    distance between their (month x days before) matrices.
+
+    Groups are numbered by size, largest first. Returns, by trip, the group
+    (``labels``) and the distance to its barycenter in days (``distance``);
+    by group, the barycenter as a (month x days before) matrix of the share
+    of the month's seats (``barycenters``); the silhouette of the clustering,
+    and the k-means model and embeddings for further analysis.
+    """
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+
+    n_months = len(data["months"])
+    embedded = [wasserstein_embedding(t["probability"], levels) for t in data["trips"]]
+    X = np.stack([e for e, _ in embedded])
+    model = KMeans(n_clusters=k, n_init=20, random_state=seed).fit(X)
+
+    order = np.argsort(-np.bincount(model.labels_, minlength=k), kind="stable")
+    relabel = np.empty(k, dtype=int)
+    relabel[order] = np.arange(k)
+    labels = relabel[model.labels_]
+    centers = model.cluster_centers_[order]
+    distance = np.linalg.norm(X - centers[labels], axis=1)
+    quantiles = centers.reshape(k, n_months, levels) * np.sqrt(n_months * levels)
+
+    return {
+        "labels": labels.tolist(),
+        "distance": distance.round(2).tolist(),
+        "barycenters": [
+            [quantiles_to_distribution(q).round(4).tolist() for q in quantiles[c]]
+            for c in range(k)
+        ],
+        "median_day": np.median(quantiles, axis=2),  # (group, month)
+        "silhouette": float(silhouette_score(X, model.labels_)),
+        "filled_months": sum(n for _, n in embedded),
+        "model": model,
+        "X": X,
+    }
+
+
 @app.command()
 def cluster_trips(
     k: int = typer.Option(4, help="Number of clusters."),
@@ -1143,34 +1219,21 @@ def cluster_trips(
 
     data = trip_explorer_data(n_trips)
     trips, months = data["trips"], data["months"]
-    embedded = [wasserstein_embedding(t["probability"], levels) for t in trips]
-    X = np.stack([e for e, _ in embedded])
-    filled = sum(n for _, n in embedded)
+    result = cluster_trip_data(data, k=k, levels=levels, seed=seed)
+    X = result["X"]
     print(
-        f"{len(trips)} trips x {len(months)} months, "
-        f"{filled} trip-months without seats filled with the trip's average"
+        f"{len(trips)} trips x {len(months)} months, {result['filled_months']} "
+        "trip-months without seats filled with the trip's average"
     )
-
-    def fit(n_clusters: int) -> KMeans:
-        return KMeans(n_clusters=n_clusters, n_init=20, random_state=seed).fit(X)
 
     # Inertia is a sum of squared distances: report the RMS distance in days
     print("k  RMS distance to centroid (days)  silhouette")
     for n in range(2, 9):
-        model = fit(n)
+        model = KMeans(n_clusters=n, n_init=20, random_state=seed).fit(X)
         print(
             f"{n}  {np.sqrt(model.inertia_ / len(X)):31.2f}  "
             f"{silhouette_score(X, model.labels_):10.3f}"
         )
-
-    model = fit(k)
-    distance = np.linalg.norm(X - model.cluster_centers_[model.labels_], axis=1)
-    # Number clusters by size, largest first
-    order = np.argsort(-np.bincount(model.labels_, minlength=k), kind="stable")
-    relabel = np.empty(k, dtype=int)
-    relabel[order] = np.arange(k)
-    labels = relabel[model.labels_]
-    centers = model.cluster_centers_[order]
 
     clusters = pl.DataFrame(
         {
@@ -1178,33 +1241,27 @@ def cluster_trips(
             "destination": [t["destination"] for t in trips],
             "rank": [t["rank"] for t in trips],
             "available": [t["available"] for t in trips],
-            "cluster": labels,
-            "distance_days": distance.round(2),
+            "group": [label + 1 for label in result["labels"]],
+            "distance_days": result["distance"],
         }
-    ).sort("cluster", "distance_days")
+    ).sort("group", "distance_days")
     clusters.write_csv(generated_file("trip_clusters.csv"))
 
-    # Barycenters back to distributions: share of the quantile levels on each day
-    quantiles = centers.reshape(k, len(months), levels) * np.sqrt(len(months) * levels)
-    days = np.arange(31)
-    rows = []
-    for c in range(k):
-        for m, month in enumerate(months):
-            q = quantiles[c, m]
-            share = np.histogram(q, bins=np.arange(32) - 0.5)[0] / levels
-            rows += [
-                {"cluster": c, "month": f"{month}-01", "days_before": int(d), "share": float(s)}
-                for d, s in zip(days, share)
-            ]
-    barycenters = pl.DataFrame(rows).with_columns(pl.col("month").str.to_date())
+    barycenters = pl.DataFrame(
+        [
+            {"group": c + 1, "month": f"{month}-01", "days_before": d, "share": share}
+            for c, matrix in enumerate(result["barycenters"])
+            for month, row in zip(months, matrix)
+            for d, share in enumerate(row)
+        ]
+    ).with_columns(pl.col("month").str.to_date())
 
     with pl.Config(tbl_rows=-1, fmt_str_lengths=40):
         for c in range(k):
-            members = clusters.filter(pl.col("cluster") == c)
-            median_day = np.median(quantiles[c], axis=1)  # per month
-            recent = median_day[-6:]
+            members = clusters.filter(pl.col("group") == c + 1)
+            recent = result["median_day"][c, -6:]
             print(
-                f"\nCluster {c}: {len(members)} trips, median booking day of the seats "
+                f"\nGroup {c + 1}: {len(members)} trips, median booking day of the seats "
                 f"over the last 6 months: {', '.join(f'{d:.0f}' for d in recent)}"
             )
             print(members.select("rank", "origin", "destination", "distance_days").head(8))
@@ -1231,7 +1288,7 @@ def cluster_trips(
                 legend=alt.Legend(format=".0%", orient="right"),
             ),
             facet=alt.Facet(
-                "cluster:N",
+                "group:N",
                 title=None,
                 columns=2,
                 header=alt.Header(labelExpr="'Groupe ' + datum.value", labelFontSize=12),

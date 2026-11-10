@@ -1,7 +1,7 @@
 <title>Meilleur jour MAXJEUNE</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <style>
-/* Layout: one reading column; picker, three trip figures, then the full-width heatmap. */
+/* Layout: one reading column; picker, trip figures, trip heatmap, then the groups (barycenter heatmap beside its member list). */
 /* Colors follow the repo figures (main.py THEME): one blue ramp, an orange accent for markers. */
 :root {
   --bg: #ffffff;
@@ -48,21 +48,22 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font); font-
 h1 { margin: 0; font-size: var(--step-3); line-height: 1.15; font-weight: 600; text-wrap: balance; }
 h2 { margin: 0; font-size: var(--step-2); line-height: 1.25; font-weight: 600; text-wrap: balance; }
 h3 { margin: 0; font-size: var(--step-1); font-weight: 600; }
-.lede { margin: 0; color: var(--muted); font-size: var(--step-1); }
+.lede { margin: 0; color: var(--muted); font-size: var(--step-1); max-width: 42rem; }
 
 .picker { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
 .picker label { font-weight: 600; }
 .picker-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+input, select, button { font: inherit; color: var(--ink); }
 .picker input, .picker select, .picker button {
-  font: inherit; color: var(--ink); background: var(--surface);
-  border: 1px solid var(--line); border-radius: 6px; padding: 0.55rem 0.7rem; min-height: 2.5rem;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+  padding: 0.55rem 0.7rem; min-height: 2.5rem;
 }
 .picker input { flex: 1 1 12rem; min-width: 0; }
 .picker select { flex: 3 1 20rem; min-width: 0; max-width: 100%; }
 .picker button { flex: 0 0 auto; cursor: pointer; }
 .picker button:hover:not(:disabled) { border-color: var(--focus); }
 .picker button:disabled { color: var(--muted); cursor: not-allowed; }
-.picker :focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .hint { margin: 0; color: var(--muted); }
 
 .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
@@ -71,12 +72,15 @@ h3 { margin: 0; font-size: var(--step-1); font-weight: 600; }
 .stat-value { font-size: var(--step-3); font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .stat-value.accent { color: var(--accent); }
 .stat-note { color: var(--muted); }
+.link-button {
+  justify-self: start; background: none; border: 0; padding: 0; color: var(--focus);
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
 
 .chart-block { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }
 .chart-head { display: grid; gap: 0.25rem; }
 .chart-sub { margin: 0; color: var(--muted); }
 .legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; align-items: center; color: var(--muted); font-size: 0.8125rem; }
-.ramp { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .ramp-steps { display: flex; }
 .ramp-step { display: grid; gap: 0.15rem; justify-items: center; font-variant-numeric: tabular-nums; }
 .ramp-step span:first-child { width: 3rem; height: 0.7rem; }
@@ -101,13 +105,42 @@ h3 { margin: 0; font-size: var(--step-1); font-weight: 600; }
   background: var(--tip-bg); color: var(--tip-fg); border-radius: 6px; padding: 0.45rem 0.6rem;
   font-size: 0.8125rem; line-height: 1.4; font-variant-numeric: tabular-nums;
 }
-.tooltip strong { display: block; }
+.tooltip strong, .tooltip span { display: block; }
+
+/* Groups */
+.groups { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; border-top: 1px solid var(--line); padding-top: 2rem; }
+.group-tabs { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.group-tab {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 999px;
+  padding: 0.4rem 0.9rem; cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.group-tab:hover { border-color: var(--focus); }
+.group-tab[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.group-tab .count { color: inherit; opacity: 0.7; }
+.group-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(15rem, 19rem); gap: 1.5rem; align-items: start; }
+.group-facts { display: flex; flex-wrap: wrap; gap: 0.5rem 1.75rem; }
+.fact { display: grid; gap: 0.1rem; }
+.fact-value { font-size: var(--step-2); font-weight: 600; }
+#best-day { font-variant-numeric: normal; }
+.fact-label { color: var(--muted); font-size: 0.8125rem; }
+.members { display: grid; gap: 0.5rem; min-width: 0; }
+.members-head { display: flex; justify-content: space-between; gap: 0.5rem; color: var(--muted); font-size: 0.8125rem; }
+.member-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 8px; max-height: 27rem; overflow-y: auto; }
+.member-list li + li { border-top: 1px solid var(--line); }
+.member {
+  width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem; align-items: baseline;
+  background: none; border: 0; text-align: left; padding: 0.5rem 0.75rem; cursor: pointer;
+}
+.member:hover { background: var(--surface); }
+.member[aria-current="true"] { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); }
+.member-name { overflow-wrap: anywhere; }
+.member-meta { color: var(--muted); font-size: 0.8125rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 760px) { .group-panel { grid-template-columns: minmax(0, 1fr); } }
 
 .method { display: grid; gap: 0.5rem; max-width: 42rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 1.25rem; }
 .method p { margin: 0; }
 .method h3 { color: var(--ink); }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; background: var(--surface); padding: 0.05em 0.3em; border-radius: 4px; }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
 </style>
 
 <main class="page">
@@ -143,6 +176,12 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
       <span class="stat-value" id="seats">—</span>
       <span class="stat-note" id="seats-note"></span>
     </div>
+    <div class="stat" id="stat-group">
+      <span class="stat-label">Groupe</span>
+      <span class="stat-value" id="group-name">—</span>
+      <span class="stat-note" id="group-note"></span>
+      <button class="link-button" id="group-link" type="button">Voir le groupe</button>
+    </div>
   </section>
 
   <section class="chart-block" id="heatmap">
@@ -150,17 +189,33 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
       <h2 id="chart-title">—</h2>
       <p class="chart-sub">Probabilité de trouver une place, rapportée au meilleur jour du mois de départ</p>
     </div>
-    <div class="legend" id="legend">
-      <div class="ramp">
-        <div class="ramp-steps" id="ramp-steps"></div>
-      </div>
-      <span class="legend-item"><span class="bg-nd"></span>Pas observé</span>
-      <span class="legend-item"><svg width="12" height="12" viewBox="-6 -6 12 12" aria-hidden="true"><circle class="best" r="4.5"></circle></svg>Meilleur jour</span>
-      <span class="legend-item"><svg width="12" height="12" viewBox="-6 -6 12 12" aria-hidden="true"><rect class="second" x="-5" y="-5" width="10" height="10"></rect></svg>Deuxième meilleur jour</span>
+    <div class="legend" data-legend="Meilleur jour"></div>
+    <div class="chart" id="trip-chart"></div>
+  </section>
+
+  <section class="groups" id="groups" aria-labelledby="groups-title">
+    <div class="chart-head">
+      <h2 id="groups-title">Groupes de trajets</h2>
+      <p class="chart-sub" id="groups-sub"></p>
     </div>
-    <div class="chart" id="chart">
-      <svg id="chart-svg" role="img" aria-labelledby="chart-title"></svg>
-      <div class="tooltip" id="tooltip" hidden></div>
+    <div class="group-tabs" id="group-tabs" role="group" aria-label="Groupes"></div>
+    <div class="group-panel">
+      <div class="chart-block" id="barycenter">
+        <div class="chart-head">
+          <h3 id="barycenter-title">—</h3>
+          <p class="chart-sub">Barycentre du groupe : part des places du mois apparues à chaque jour avant le départ, rapportée au jour le plus fourni du mois</p>
+        </div>
+        <div class="group-facts" id="group-facts">
+          <div class="fact"><span class="fact-value" id="median-2025">—</span><span class="fact-label">Jour médian des places, départs 2025</span></div>
+          <div class="fact"><span class="fact-value" id="median-2026">—</span><span class="fact-label">Depuis mars 2026</span></div>
+        </div>
+        <div class="legend" data-legend="Jour le plus fourni"></div>
+        <div class="chart" id="group-chart"></div>
+      </div>
+      <div class="members" id="members">
+        <div class="members-head"><span id="members-count">—</span><span>rang · écart</span></div>
+        <ul class="member-list" id="member-list"></ul>
+      </div>
     </div>
   </section>
 
@@ -168,6 +223,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     <h3>Méthode</h3>
     <p>Une observation est un train vu dans une des recherches quotidiennes du jeu de données SNCF, entre 0 et 30 jours avant son départ. La probabilité d'une case est la part des trains du mois qui avaient une place MAXJEUNE à ce nombre de jours du départ. Les cars, les trains internationaux et les OUIGO sont exclus.</p>
     <p>Les couleurs comparent chaque jour au meilleur jour du même mois, ce qui efface les variations saisonnières du niveau général. Le classement des trajets compte toutes les observations avec une place sur l'historique.</p>
+    <p>Groupes : chaque mois d'un trajet devient une distribution de ses places sur les 31 jours avant le départ, quel que soit leur nombre. Deux trajets sont proches quand, mois par mois, leurs places apparaissent au même moment (distance de Wasserstein, en jours). Les groupes sont trouvés par k-means ; le barycentre est le profil moyen au sens de cette distance, et l'écart d'un trajet est sa distance au barycentre de son groupe.</p>
     <p id="method-window"></p>
   </section>
 </main>
@@ -178,6 +234,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   "use strict";
   var DATA = JSON.parse(document.getElementById("trip-data").textContent);
   var trips = DATA.trips;
+  var CL = DATA.clusters;
   var months = DATA.months.map(function (m) {
     var parts = m.split("-");
     return new Date(Number(parts[0]), Number(parts[1]) - 1, 1);
@@ -185,25 +242,18 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   var THRESHOLDS = [0.5, 0.7, 0.8, 0.9, 0.95];
   var RAMP_LABELS = ["< 50 %", "50 %", "70 %", "80 %", "90 %", "95 %+"];
   var STORAGE_KEY = "maxjeune-trip";
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   var nf = new Intl.NumberFormat("fr-FR");
+  var dec1 = new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  var dec2 = new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   var pct = new Intl.NumberFormat("fr-FR", { style: "percent", maximumFractionDigits: 0 });
   var pct1 = new Intl.NumberFormat("fr-FR", { style: "percent", minimumFractionDigits: 1, maximumFractionDigits: 1 });
   var monthShort = new Intl.DateTimeFormat("fr-FR", { month: "short", year: "2-digit" });
   var monthLong = new Intl.DateTimeFormat("fr-FR", { month: "long", year: "numeric" });
   var dayLong = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long", year: "numeric" });
 
-  var els = {
-    search: document.getElementById("trip-search"),
-    select: document.getElementById("trip-select"),
-    swap: document.getElementById("swap"),
-    hint: document.getElementById("picker-hint"),
-    title: document.getElementById("chart-title"),
-    chart: document.getElementById("chart"),
-    svg: document.getElementById("chart-svg"),
-    tooltip: document.getElementById("tooltip")
-  };
-
+  function $(id) { return document.getElementById(id); }
   function key(trip) { return trip.origin + "→" + trip.destination; }
   var byKey = {};
   trips.forEach(function (t) { byKey[key(t)] = t; });
@@ -230,30 +280,262 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     return "c" + i;
   }
   function dayLabel(d) { return d === 0 ? "Jour J" : "J-" + d; }
+  function groupName(c) { return "Groupe " + (c + 1); }
 
-  // Legend ramp
-  var steps = document.getElementById("ramp-steps");
-  RAMP_LABELS.forEach(function (label, i) {
-    var step = document.createElement("span");
-    step.className = "ramp-step";
-    var sw = document.createElement("span");
-    sw.className = "bg-r" + i;
-    var text = document.createElement("span");
-    text.textContent = label;
-    step.appendChild(sw);
-    step.appendChild(text);
-    steps.appendChild(step);
+  // Legends (same ramp for both heatmaps, different reference)
+  Array.prototype.forEach.call(document.querySelectorAll("[data-legend]"), function (legend) {
+    var ramp = document.createElement("div");
+    ramp.className = "ramp-steps";
+    RAMP_LABELS.forEach(function (label, i) {
+      var step = document.createElement("span");
+      step.className = "ramp-step";
+      var sw = document.createElement("span");
+      sw.className = "bg-r" + i;
+      var text = document.createElement("span");
+      text.textContent = label;
+      step.appendChild(sw);
+      step.appendChild(text);
+      ramp.appendChild(step);
+    });
+    legend.appendChild(ramp);
+    legend.insertAdjacentHTML("beforeend",
+      '<span class="legend-item"><span class="bg-nd"></span>Pas observé</span>' +
+      '<span class="legend-item"><svg width="12" height="12" viewBox="-6 -6 12 12" aria-hidden="true"><circle class="best" r="4.5"></circle></svg></span>' +
+      '<span class="legend-item"><svg width="12" height="12" viewBox="-6 -6 12 12" aria-hidden="true"><rect class="second" x="-5" y="-5" width="10" height="10"></rect></svg>Deuxième</span>');
+    legend.children[2].appendChild(document.createTextNode(legend.getAttribute("data-legend")));
+  });
+
+  /* Heatmap of a (month x days before) matrix.
+     spec = { values: [month][day] (null = not observed), ref: [month] (value of the
+     reference day, colors are values / ref), markers: [{month, best, second}],
+     tip: function (month, day) -> [lines] } */
+  function Heatmap(container, label) {
+    this.container = container;
+    this.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    this.svg.setAttribute("role", "img");
+    this.svg.setAttribute("aria-label", label);
+    this.tip = document.createElement("div");
+    this.tip.className = "tooltip";
+    this.tip.hidden = true;
+    container.appendChild(this.svg);
+    container.appendChild(this.tip);
+    this.spec = null;
+    var self = this;
+    this.svg.addEventListener("pointermove", function (e) { self.showTip(e); });
+    this.svg.addEventListener("pointerdown", function (e) { self.showTip(e); });
+    this.svg.addEventListener("pointerleave", function (e) { if (e.pointerType === "mouse") self.hideTip(); });
+    var lastWidth = 0;
+    if (window.ResizeObserver) {
+      new ResizeObserver(function () {
+        var w = container.clientWidth;
+        if (w !== lastWidth) { lastWidth = w; if (self.spec) self.draw(self.spec); }
+      }).observe(container);
+    } else {
+      window.addEventListener("resize", function () { if (self.spec) self.draw(self.spec); });
+    }
+  }
+
+  Heatmap.prototype.draw = function (spec) {
+    this.spec = spec;
+    var width = Math.max(this.container.clientWidth, 260);
+    var m = { t: 8, r: 8, b: 46, l: 40 };
+    var cw = (width - m.l - m.r) / months.length;
+    var ch = width < 560 ? 9 : 11;
+    var height = m.t + 31 * ch + m.b;
+    this.geom = { m: m, cw: cw, ch: ch };
+    function y(d) { return m.t + (30 - d) * ch; }
+
+    var out = [];
+    out.push('<rect class="nd" x="' + m.l + '" y="' + m.t + '" width="' + (cw * months.length) + '" height="' + (31 * ch) + '"></rect>');
+    spec.values.forEach(function (col, mi) {
+      var ref = spec.ref[mi];
+      var x = m.l + mi * cw;
+      col.forEach(function (v, d) {
+        if (v === null) return;
+        var cls = ref ? relativeClass(v / ref) : "c0";
+        out.push('<rect class="' + cls + '" x="' + x.toFixed(2) + '" y="' + y(d) + '" width="' + (cw + 0.4).toFixed(2) + '" height="' + (ch + 0.4) + '"></rect>');
+      });
+    });
+    var size = Math.min(cw, ch);
+    spec.markers.forEach(function (b) {
+      var cx = m.l + (b.month + 0.5) * cw;
+      if (b.second !== null) {
+        var s = size * 0.95;
+        out.push('<rect class="second" x="' + (cx - s / 2).toFixed(2) + '" y="' + (y(b.second) + ch / 2 - s / 2).toFixed(2) + '" width="' + s.toFixed(2) + '" height="' + s.toFixed(2) + '"></rect>');
+      }
+      out.push('<circle class="best" cx="' + cx.toFixed(2) + '" cy="' + (y(b.best) + ch / 2) + '" r="' + (size * 0.36).toFixed(2) + '"></circle>');
+    });
+    out.push('<path class="domain" d="M' + m.l + ',' + m.t + 'V' + (m.t + 31 * ch) + 'H' + (m.l + cw * months.length) + '"></path>');
+    for (var d = 0; d <= 30; d += 5) {
+      out.push('<text class="tick" x="' + (m.l - 6) + '" y="' + (y(d) + ch / 2) + '" dy="0.35em" text-anchor="end">' + d + '</text>');
+    }
+    out.push('<text class="axis-title" transform="translate(11,' + (m.t + 15.5 * ch) + ') rotate(-90)" text-anchor="middle">Jours avant le départ</text>');
+    var every = Math.ceil(30 / cw);
+    months.forEach(function (date, mi) {
+      if ((months.length - 1 - mi) % every !== 0) return;
+      var x = m.l + (mi + 0.5) * cw;
+      out.push('<text class="tick" transform="translate(' + x.toFixed(2) + ',' + (m.t + 31 * ch + 8) + ') rotate(-45)" text-anchor="end" dy="0.35em">' + monthShort.format(date) + '</text>');
+    });
+    out.push('<rect class="hover" width="0" height="0" visibility="hidden"></rect>');
+
+    this.svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+    this.svg.setAttribute("width", width);
+    this.svg.setAttribute("height", height);
+    this.svg.innerHTML = out.join("");
+    this.hover = this.svg.lastChild;
+    this.hideTip();
+  };
+
+  Heatmap.prototype.hideTip = function () {
+    this.tip.hidden = true;
+    if (this.hover) this.hover.setAttribute("visibility", "hidden");
+  };
+
+  Heatmap.prototype.showTip = function (evt) {
+    if (!this.spec || !this.geom) return;
+    var box = this.svg.getBoundingClientRect();
+    var scale = box.width / Number(this.svg.getAttribute("width"));
+    var px = (evt.clientX - box.left) / scale, py = (evt.clientY - box.top) / scale;
+    var g = this.geom, mi = Math.floor((px - g.m.l) / g.cw), row = Math.floor((py - g.m.t) / g.ch);
+    if (mi < 0 || mi >= months.length || row < 0 || row > 30) { this.hideTip(); return; }
+    var d = 30 - row;
+    this.hover.setAttribute("x", g.m.l + mi * g.cw);
+    this.hover.setAttribute("y", g.m.t + row * g.ch);
+    this.hover.setAttribute("width", g.cw);
+    this.hover.setAttribute("height", g.ch);
+    this.hover.setAttribute("visibility", "visible");
+
+    var tip = this.tip;
+    tip.textContent = "";
+    var head = document.createElement("strong");
+    head.textContent = monthLong.format(months[mi]) + " · " + dayLabel(d);
+    tip.appendChild(head);
+    this.spec.tip(mi, d).forEach(function (l) {
+      var s = document.createElement("span");
+      s.textContent = l;
+      tip.appendChild(s);
+    });
+    tip.hidden = false;
+    var cbox = this.container.getBoundingClientRect();
+    var tx = evt.clientX - cbox.left + 14, ty = evt.clientY - cbox.top + 14;
+    if (tx + tip.offsetWidth > cbox.width) tx = evt.clientX - cbox.left - tip.offsetWidth - 14;
+    if (tx < 0) tx = 0;
+    tip.style.left = tx + "px";
+    tip.style.top = ty + "px";
+  };
+
+  var tripChart = new Heatmap($("trip-chart"), "Probabilité de trouver une place, par mois de départ et jour avant le départ");
+  var groupChart = new Heatmap($("group-chart"), "Barycentre du groupe, par mois de départ et jour avant le départ");
+
+  // Groups: barycenter facts and markers
+  var groups = CL.barycenters.map(function (matrix, c) {
+    var members = trips.filter(function (t) { return t.cluster === c; })
+      .sort(function (a, b) { return a.cluster_distance - b.cluster_distance; });
+    var ref = [], markers = [], medians = [];
+    matrix.forEach(function (row, mi) {
+      var order = row.map(function (v, d) { return d; }).sort(function (a, b) { return row[b] - row[a] || b - a; });
+      ref.push(row[order[0]]);
+      markers.push({ month: mi, best: order[0], second: row[order[1]] > 0 ? order[1] : null });
+      var cum = 0, median = 30;
+      for (var d = 0; d <= 30; d++) { cum += row[d]; if (cum >= 0.5) { median = d; break; } }
+      medians.push(median);
+    });
+    function meanMedian(test) {
+      var vals = medians.filter(function (_, mi) { return test(months[mi]); });
+      return vals.length ? vals.reduce(function (s, v) { return s + v; }, 0) / vals.length : null;
+    }
+    return {
+      index: c, matrix: matrix, members: members, ref: ref, markers: markers,
+      median2025: meanMedian(function (d) { return d.getFullYear() === 2025; }),
+      median2026: meanMedian(function (d) { return d >= new Date(2026, 2, 1); })
+    };
+  });
+
+  $("groups-sub").textContent = "Trajets regroupés selon le moment où leurs places apparaissent, mois par mois (k-means sur la distance de Wasserstein, " +
+    CL.k + " groupes). Silhouette " + dec2.format(CL.silhouette) + " : les groupes se recouvrent en partie.";
+
+  var tabs = $("group-tabs");
+  groups.forEach(function (g) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "group-tab";
+    b.id = "group-tab-" + g.index;
+    b.setAttribute("aria-pressed", "false");
+    b.textContent = groupName(g.index) + " ";
+    var count = document.createElement("span");
+    count.className = "count";
+    count.textContent = "· " + g.members.length + " trajets";
+    b.appendChild(count);
+    b.addEventListener("click", function () { showGroup(g.index); });
+    tabs.appendChild(b);
+  });
+
+  var currentGroup = null;
+  function showGroup(c) {
+    currentGroup = c;
+    var g = groups[c];
+    Array.prototype.forEach.call(tabs.children, function (b, i) { b.setAttribute("aria-pressed", String(i === c)); });
+    $("barycenter-title").textContent = groupName(c) + " : barycentre de " + g.members.length + " trajets";
+    $("median-2025").textContent = g.median2025 === null ? "—" : "J-" + dec1.format(g.median2025);
+    $("median-2026").textContent = g.median2026 === null ? "—" : "J-" + dec1.format(g.median2026);
+    groupChart.draw({
+      values: g.matrix, ref: g.ref, markers: g.markers,
+      tip: function (mi, d) {
+        var v = g.matrix[mi][d];
+        return [
+          pct1.format(v) + " des places du mois apparaissent ce jour-là",
+          pct.format(v / g.ref[mi]) + " du jour le plus fourni (" + dayLabel(g.markers[mi].best) + ")"
+        ];
+      }
+    });
+    renderMembers();
+  }
+
+  function renderMembers() {
+    if (currentGroup === null) return;
+    var g = groups[currentGroup];
+    $("members-count").textContent = g.members.length + " trajets, du plus typique au moins typique";
+    var list = $("member-list");
+    list.textContent = "";
+    g.members.forEach(function (t) {
+      var li = document.createElement("li");
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "member";
+      if (t === current) b.setAttribute("aria-current", "true");
+      var name = document.createElement("span");
+      name.className = "member-name";
+      name.textContent = tripLabel(t);
+      var meta = document.createElement("span");
+      meta.className = "member-meta";
+      meta.textContent = "#" + t.rank + " · " + dec1.format(t.cluster_distance) + " j";
+      b.appendChild(name);
+      b.appendChild(meta);
+      b.title = "Écart au barycentre : " + dec2.format(t.cluster_distance) + " jour (distance de Wasserstein moyenne)";
+      b.addEventListener("click", function () {
+        select(t, true);
+        $("picker").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+      });
+      li.appendChild(b);
+      list.appendChild(li);
+    });
+  }
+
+  $("group-link").addEventListener("click", function () {
+    showGroup(current.cluster);
+    $("groups").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
   });
 
   var first = new Date(DATA.departures_from + "T00:00:00");
   var last = new Date(DATA.generated + "T00:00:00");
-  document.getElementById("method-window").textContent =
+  $("method-window").textContent =
     "Départs du " + dayLong.format(first) + " au " + dayLong.format(last) + ", " +
     trips.length + " trajets avec le plus de places. Page générée par " +
     "uv run main.py trip-explorer.";
 
   // Picker
   var current = null;
+  var els = { search: $("trip-search"), select: $("trip-select"), swap: $("swap"), hint: $("picker-hint") };
   function fillSelect(query) {
     var q = normalize(query.trim());
     var shown = trips.filter(function (t) { return !q || normalize(t.origin + " " + t.destination).indexOf(q) !== -1; });
@@ -271,7 +553,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     return shown;
   }
 
-  function select(trip) {
+  function select(trip, followGroup) {
     current = trip;
     if (byKey[els.select.value] !== trip) {
       if (!Array.prototype.some.call(els.select.options, function (o) { return o.value === key(trip); })) {
@@ -284,23 +566,28 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     els.swap.disabled = !reverse;
     els.swap.title = reverse ? tripLabel(reverse) : "Le trajet inverse n'est pas dans la liste";
     try { localStorage.setItem(STORAGE_KEY, key(trip)); } catch (e) {}
-    render();
+    renderTrip();
+    if (followGroup || currentGroup === null) showGroup(trip.cluster);
+    else renderMembers();
   }
 
   els.search.addEventListener("input", function () {
     var shown = fillSelect(els.search.value);
     if (!shown.length) return;
-    if (shown.indexOf(current) === -1) select(shown[0]);
+    if (shown.indexOf(current) === -1) select(shown[0], true);
     else els.select.value = key(current);
   });
-  els.select.addEventListener("change", function () { select(byKey[els.select.value]); });
+  els.select.addEventListener("change", function () { select(byKey[els.select.value], true); });
   els.swap.addEventListener("click", function () {
     var reverse = byKey[current.destination + "→" + current.origin];
-    if (reverse) select(reverse);
+    if (reverse) select(reverse, true);
   });
 
-  // Summary figures over the last 6 months with a best day
-  function renderSummary(trip) {
+  function renderTrip() {
+    var trip = current;
+    $("chart-title").textContent = tripLabel(trip);
+
+    // Summary figures over the last 6 months with a best day
     var recent = trip.best.slice(-6);
     var counts = {};
     recent.forEach(function (b) { counts[b.best] = (counts[b.best] || 0) + 1; });
@@ -309,144 +596,39 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
       d = Number(d);
       if (mode === null || counts[d] > counts[mode] || (counts[d] === counts[mode] && d > mode)) mode = d;
     });
-    document.getElementById("best-day").textContent = mode === null ? "—" : dayLabel(mode);
-    document.getElementById("best-day-note").textContent = mode === null ? "Aucune place observée"
+    $("best-day").textContent = mode === null ? "—" : dayLabel(mode);
+    $("best-day-note").textContent = mode === null ? "Aucune place observée"
       : "Meilleur jour dans " + counts[mode] + " des " + recent.length + " derniers mois";
     var mean = recent.reduce(function (s, b) { return s + b.probability; }, 0) / (recent.length || 1);
-    document.getElementById("best-chance").textContent = recent.length ? pct.format(mean) : "—";
-    document.getElementById("best-chance-note").textContent = "Des trains avaient une place ce jour-là (moyenne sur 6 mois)";
-    document.getElementById("seats").textContent = nf.format(trip.available);
-    document.getElementById("seats-note").textContent = "Rang " + trip.rank + " sur " + trips.length +
+    $("best-chance").textContent = recent.length ? pct.format(mean) : "—";
+    $("best-chance-note").textContent = "Des trains avaient une place ce jour-là (moyenne sur 6 mois)";
+    $("seats").textContent = nf.format(trip.available);
+    $("seats-note").textContent = "Rang " + trip.rank + " sur " + trips.length +
       " · " + pct1.format(trip.available / trip.total) + " des " + nf.format(trip.total) + " observations";
-  }
+    $("group-name").textContent = groupName(trip.cluster);
+    $("group-note").textContent = "Écart au barycentre : " + dec1.format(trip.cluster_distance) + " jour" +
+      (trip.cluster_distance >= 2 ? "s" : "") + " · " + groups[trip.cluster].members.length + " trajets";
 
-  // Heatmap
-  var geom = null;
-  function render() {
-    if (!current) return;
-    els.title.textContent = tripLabel(current);
-    renderSummary(current);
-    drawChart(current);
-  }
-
-  function drawChart(trip) {
-    var width = Math.max(els.chart.clientWidth, 280);
-    var narrow = width < 560;
-    var m = { t: 8, r: 8, b: 46, l: 40 };
-    var cw = (width - m.l - m.r) / months.length;
-    var ch = narrow ? 9 : 11;
-    var height = m.t + 31 * ch + m.b;
     var bestByMonth = {};
     trip.best.forEach(function (b) { bestByMonth[b.month] = b; });
-    geom = { m: m, cw: cw, ch: ch, bestByMonth: bestByMonth };
-
-    function y(d) { return m.t + (30 - d) * ch; }
-    var out = [];
-    out.push('<rect class="nd" x="' + m.l + '" y="' + m.t + '" width="' + (cw * months.length) + '" height="' + (31 * ch) + '"></rect>');
-    trip.probability.forEach(function (col, mi) {
-      var b = bestByMonth[mi];
-      var x = m.l + mi * cw;
-      col.forEach(function (p, d) {
-        if (p === null) return;
-        var cls = b ? relativeClass(p / b.probability) : "c0";
-        out.push('<rect class="' + cls + '" x="' + x.toFixed(2) + '" y="' + y(d) + '" width="' + (cw + 0.4).toFixed(2) + '" height="' + (ch + 0.4) + '"></rect>');
-      });
-    });
-    // Markers
-    var size = Math.min(cw, ch);
-    trip.best.forEach(function (b) {
-      var cx = m.l + (b.month + 0.5) * cw;
-      if (b.second !== null) {
-        var s = size * 0.95;
-        out.push('<rect class="second" x="' + (cx - s / 2).toFixed(2) + '" y="' + (y(b.second) + ch / 2 - s / 2).toFixed(2) + '" width="' + s.toFixed(2) + '" height="' + s.toFixed(2) + '"></rect>');
+    tripChart.draw({
+      values: trip.probability,
+      ref: months.map(function (_, mi) { return bestByMonth[mi] ? bestByMonth[mi].probability : null; }),
+      markers: trip.best,
+      tip: function (mi, d) {
+        var p = trip.probability[mi][d], b = bestByMonth[mi];
+        if (p === null) return ["Pas observé"];
+        return [pct1.format(p) + " des trains avaient une place",
+          b ? pct.format(p / b.probability) + " du meilleur jour (" + dayLabel(b.best) + ", " + pct1.format(b.probability) + ")"
+            : "Aucune place ce mois-ci"];
       }
-      out.push('<circle class="best" cx="' + cx.toFixed(2) + '" cy="' + (y(b.best) + ch / 2) + '" r="' + (size * 0.36).toFixed(2) + '"></circle>');
     });
-    // Axes
-    out.push('<path class="domain" d="M' + m.l + ',' + m.t + 'V' + (m.t + 31 * ch) + 'H' + (m.l + cw * months.length) + '"></path>');
-    for (var d = 0; d <= 30; d += 5) {
-      out.push('<text class="tick" x="' + (m.l - 6) + '" y="' + (y(d) + ch / 2) + '" dy="0.35em" text-anchor="end">' + d + '</text>');
-    }
-    out.push('<text class="axis-title" transform="translate(11,' + (m.t + 15.5 * ch) + ') rotate(-90)" text-anchor="middle">Jours avant le départ</text>');
-    var every = Math.ceil(30 / cw);
-    months.forEach(function (date, mi) {
-      if ((months.length - 1 - mi) % every !== 0) return;
-      var x = m.l + (mi + 0.5) * cw;
-      out.push('<text class="tick" transform="translate(' + x.toFixed(2) + ',' + (m.t + 31 * ch + 8) + ') rotate(-45)" text-anchor="end" dy="0.35em">' + monthShort.format(date) + '</text>');
-    });
-    out.push('<rect class="hover" id="hover" width="0" height="0" visibility="hidden"></rect>');
-
-    els.svg.setAttribute("viewBox", "0 0 " + width + " " + height);
-    els.svg.setAttribute("width", width);
-    els.svg.setAttribute("height", height);
-    els.svg.innerHTML = out.join("");
-    hideTip();
-  }
-
-  function hideTip() {
-    els.tooltip.hidden = true;
-    var h = document.getElementById("hover");
-    if (h) h.setAttribute("visibility", "hidden");
-  }
-
-  function showTip(evt) {
-    if (!geom || !current) return;
-    var box = els.svg.getBoundingClientRect();
-    var scale = box.width / Number(els.svg.getAttribute("width"));
-    var px = (evt.clientX - box.left) / scale, py = (evt.clientY - box.top) / scale;
-    var g = geom, mi = Math.floor((px - g.m.l) / g.cw), row = Math.floor((py - g.m.t) / g.ch);
-    if (mi < 0 || mi >= months.length || row < 0 || row > 30) { hideTip(); return; }
-    var d = 30 - row;
-    var p = current.probability[mi][d];
-    var b = g.bestByMonth[mi];
-    var hover = document.getElementById("hover");
-    hover.setAttribute("x", g.m.l + mi * g.cw);
-    hover.setAttribute("y", g.m.t + row * g.ch);
-    hover.setAttribute("width", g.cw);
-    hover.setAttribute("height", g.ch);
-    hover.setAttribute("visibility", "visible");
-
-    var tip = els.tooltip;
-    tip.textContent = "";
-    var head = document.createElement("strong");
-    head.textContent = monthLong.format(months[mi]) + " · " + dayLabel(d);
-    tip.appendChild(head);
-    var lines = [];
-    if (p === null) lines.push("Pas observé");
-    else {
-      lines.push(pct1.format(p) + " des trains avaient une place");
-      if (b) lines.push(pct.format(p / b.probability) + " du meilleur jour (" + dayLabel(b.best) + ", " + pct1.format(b.probability) + ")");
-      else lines.push("Aucune place ce mois-ci");
-    }
-    lines.forEach(function (l) { var s = document.createElement("span"); s.textContent = l; s.style.display = "block"; tip.appendChild(s); });
-    tip.hidden = false;
-
-    var cbox = els.chart.getBoundingClientRect();
-    var tx = evt.clientX - cbox.left + 14, ty = evt.clientY - cbox.top + 14;
-    if (tx + tip.offsetWidth > cbox.width) tx = evt.clientX - cbox.left - tip.offsetWidth - 14;
-    if (tx < 0) tx = 0;
-    tip.style.left = tx + "px";
-    tip.style.top = ty + "px";
-  }
-
-  els.svg.addEventListener("pointermove", showTip);
-  els.svg.addEventListener("pointerdown", showTip);
-  els.svg.addEventListener("pointerleave", function (e) { if (e.pointerType === "mouse") hideTip(); });
-
-  var lastWidth = 0;
-  if (window.ResizeObserver) {
-    new ResizeObserver(function () {
-      var w = els.chart.clientWidth;
-      if (w !== lastWidth) { lastWidth = w; if (current) drawChart(current); }
-    }).observe(els.chart);
-  } else {
-    window.addEventListener("resize", function () { if (current) drawChart(current); });
   }
 
   // Start on the remembered trip, or the trip with the most seats
   fillSelect("");
   var saved = null;
   try { saved = localStorage.getItem(STORAGE_KEY); } catch (e) {}
-  select(byKey[saved] || trips[0]);
+  select(byKey[saved] || trips[0], true);
 })();
 </script>
