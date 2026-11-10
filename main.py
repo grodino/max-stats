@@ -445,7 +445,9 @@ def update_readme():
 
 
 def booking_lead_time_table(
-    condition: pl.Expr | None = None, split_periods: bool = True
+    condition: pl.Expr | None = None,
+    split_periods: bool = True,
+    where: pl.Expr | None = None,
 ) -> pl.DataFrame:
     """Probability that a MAXJEUNE seat is available, by days before departure.
 
@@ -473,6 +475,10 @@ def booking_lead_time_table(
     one curve per destination, ``pl.col("axe") == "SUD EST"`` gives one curve
     for True and one for False. The expression should be constant for a given
     train leg (``TRAIN``), otherwise the leg is split between several values.
+
+    ``where`` is an optional polars expression evaluated on the raw rows to
+    keep only some of them, e.g. ``trip_filter("PARIS (intramuros)", "FRBOJ")``
+    to restrict the table to one trip.
     """
     if split_periods:
         period = (
@@ -519,6 +525,7 @@ def booking_lead_time_table(
                 *trip_filters(name="origine"),
                 *trip_filters(name="destination"),
                 ~pl.col("axe").str.starts_with("OUIGO"),
+                pl.lit(True) if where is None else where,
             )
             .with_columns(
                 period=period,
@@ -620,6 +627,51 @@ def best_booking_time(table: pl.DataFrame, min_observations: int = 0) -> pl.Data
         )
         .sort(keys)
     )
+
+
+def station_filter(name: str, station: str) -> pl.Expr:
+    """Rows whose ``name`` (``"origine"`` or ``"destination"``) is ``station``.
+
+    ``station`` is either an iata code (``FRBOJ``) or a station name as
+    written in the data (``"PARIS (intramuros)"``, case insensitive). A name
+    can cover several iata codes, e.g. all the stations of Paris.
+    """
+    station = station.strip().upper()
+    return (pl.col(f"{name}_iata") == station) | (
+        pl.col(name).str.to_uppercase() == station
+    )
+
+
+def trip_filter(origin: str | None = None, destination: str | None = None) -> pl.Expr:
+    """Rows of the trip from ``origin`` to ``destination`` (see ``station_filter``).
+
+    Either end can be ``None`` to keep all the origins or destinations.
+    """
+    filters = [
+        station_filter(name, station)
+        for name, station in (("origine", origin), ("destination", destination))
+        if station is not None
+    ]
+    return pl.all_horizontal(filters) if filters else pl.lit(True)
+
+
+def matched_stations(origin: str | None, destination: str | None) -> pl.DataFrame:
+    """Station names and iata codes of the trip, raising if it is never served."""
+    matched = (
+        scan_files()
+        .filter(trip_filter(origin, destination))
+        .group_by("origine", "origine_iata", "destination", "destination_iata")
+        .agg(rows=pl.len())
+        .sort("rows", descending=True)
+        .collect(engine="streaming")
+    )
+    if len(matched) == 0:
+        raise typer.BadParameter(
+            f"No train from {origin or 'anywhere'} to {destination or 'anywhere'}. "
+            "Use an iata code (e.g. FRBOJ) or a station name as written in the "
+            "data (e.g. 'PARIS (intramuros)')."
+        )
+    return matched
 
 
 def station_coordinates() -> pl.DataFrame:
@@ -790,20 +842,60 @@ def availability_map(
 
 
 @app.command()
-def best_time_evolution():
+def best_time_evolution(
+    origin: str | None = typer.Option(
+        None, help="Origin station: iata code (FRPMO) or name ('PARIS (intramuros)')."
+    ),
+    destination: str | None = typer.Option(
+        None, help="Destination station: iata code (FRBOJ) or name ('BORDEAUX ST JEAN')."
+    ),
+    min_observations: int = typer.Option(
+        0, help="Drop months with fewer observations (train leg x snapshot)."
+    ),
+):
     """Plot the evolution of the best day to book, per month of departure.
 
     Uses the full history (departures whose 30-day booking window was fully
     observed). The heatmap shows, for each month, the probability of finding a
     seat at each booking day relative to the month's best day, which removes
     seasonal variations of the overall level.
+
+    By default all trips are pooled. With ``--origin`` and/or
+    ``--destination``, only the trains of that trip are used, and the figure
+    and table are written to ``data/generated`` instead of ``assets``.
     """
+    title = "Évolution du meilleur moment pour réserver une place MAXJEUNE"
+    figure = Path("assets/best_time_evolution.svg")
+    best_file = "best_time_by_month.csv"
+    where = None
+    if origin is not None or destination is not None:
+        stations = matched_stations(origin, destination)
+        print("Trip stations:")
+        print(stations)
+
+        def label(name: str, station: str | None) -> str:
+            if station is None:
+                return "toutes gares"
+            return " / ".join(stations[name].unique(maintain_order=True).to_list())
+
+        trip = f"{label('origine', origin)} → {label('destination', destination)}"
+        title = [title, trip]
+        slug = re.sub(
+            r"[^a-z0-9]+", "-", f"{origin or 'all'}_{destination or 'all'}".lower()
+        ).strip("-")
+        figure = generated_file(f"best_time_evolution_{slug}.svg")
+        best_file = f"best_time_by_month_{slug}.csv"
+        where = trip_filter(origin, destination)
+
     table = booking_lead_time_table(
-        condition=pl.col("date").dt.truncate("1mo"), split_periods=False
+        condition=pl.col("date").dt.truncate("1mo"), split_periods=False, where=where
     )
-    best = best_booking_time(table).rename({"condition": "month"})
+    best = best_booking_time(table, min_observations).rename({"condition": "month"})
+    if len(best) == 0:
+        print("No month with a MAXJEUNE seat for this trip.")
+        raise typer.Exit(1)
     table = table.rename({"condition": "month"})
-    best.drop("period").write_csv(generated_file("best_time_by_month.csv"))
+    best.drop("period").write_csv(generated_file(best_file))
 
     relative = table.join(
         best.select("month", "best_probability"), on="month", maintain_order="left"
@@ -873,13 +965,22 @@ def best_time_evolution():
         .properties(
             width=520,
             height=300,
-            title="Évolution du meilleur moment pour réserver une place MAXJEUNE",
+            title=title,
         )
     )
-    plot.save("assets/best_time_evolution.svg")
+    plot.save(figure)
+    print(f"Figure saved to {figure}")
 
     with pl.Config(tbl_rows=40):
-        print(best.select("month", "best_days_before", "second_best_days_before", "best_probability"))
+        print(
+            best.select(
+                "month",
+                "best_days_before",
+                "second_best_days_before",
+                "best_probability",
+                "observations",
+            )
+        )
 
 
 @app.command()
