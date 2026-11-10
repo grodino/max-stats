@@ -1065,7 +1065,7 @@ def trip_explorer_data(n_trips: int) -> dict:
 @app.command()
 def trip_explorer(
     n_trips: int = typer.Option(100, help="Number of trips to include."),
-    k: int = typer.Option(4, help="Number of trip groups (see cluster-trips)."),
+    k: int = typer.Option(6, help="Number of trip groups (see cluster-trips --choose-k)."),
     seed: int = typer.Option(0, help="Random seed of k-means."),
     output: Path = typer.Option(
         GENERATED_FOLDER / "trip_explorer.html", help="HTML page to write."
@@ -1154,6 +1154,89 @@ def quantiles_to_distribution(quantiles, n_days: int = 31):
     return share / len(q)
 
 
+def choose_k(
+    X, n_months: int, max_k: int = 12, n_boot: int = 30, n_ref: int = 20, seed: int = 0
+) -> pl.DataFrame:
+    """Scores to choose the number of k-means clusters of the embeddings ``X``
+    (one row per trip, ``n_months`` blocks of quantiles, see
+    ``wasserstein_embedding``), for k = 1..``max_k``.
+
+    - ``rms_days``: RMS distance of the trips to their centroid, in days.
+    - ``silhouette``: mean silhouette (k >= 2), higher is better separated.
+    - ``gap`` and ``gap_sd``: gap statistic (Tibshirani, Walther and Hastie,
+      2001), log within-cluster dispersion of ``n_ref`` reference datasets
+      without clusters (uniform in the box of the principal components of
+      ``X``) minus that of ``X``. The usual rule takes the smallest k with
+      gap(k) >= gap(k+1) - gap_sd(k+1); k = 1 means no cluster structure.
+    - ``stability`` and ``stability_p10``: adjusted Rand index between the
+      clusters of all the data and those of ``n_boot`` bootstrap samples of
+      the months (k-means refitted with another seed), mean and 10th
+      percentile. 1 means the same groups whatever the months used.
+    """
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import adjusted_rand_score, silhouette_score
+
+    rng = np.random.default_rng(seed)
+    n = len(X)
+
+    def fit(Y, k: int, random_state: int, n_init: int = 10) -> KMeans:
+        return KMeans(n_clusters=k, n_init=n_init, random_state=random_state).fit(Y)
+
+    def log_dispersion(Y, k: int) -> float:
+        if k == 1:
+            return float(np.log(((Y - Y.mean(axis=0)) ** 2).sum()))
+        return float(np.log(fit(Y, k, seed).inertia_))
+
+    mean = X.mean(axis=0)
+    _, _, vt = np.linalg.svd(X - mean, full_matrices=False)
+    scores = (X - mean) @ vt.T
+    references = [
+        rng.uniform(scores.min(axis=0), scores.max(axis=0), size=scores.shape) @ vt + mean
+        for _ in range(n_ref)
+    ]
+    blocks = X.reshape(n, n_months, -1)
+
+    rows = []
+    for k in range(1, max_k + 1):
+        reference = np.array([log_dispersion(R, k) for R in references])
+        row = {
+            "k": k,
+            "gap": reference.mean() - log_dispersion(X, k),
+            "gap_sd": reference.std() * np.sqrt(1 + 1 / n_ref),
+            "rms_days": None,
+            "silhouette": None,
+            "stability": None,
+            "stability_p10": None,
+        }
+        if k == 1:
+            row["rms_days"] = float(np.sqrt(((X - mean) ** 2).sum() / n))
+        else:
+            model = fit(X, k, seed, n_init=20)
+            ari = []
+            for b in range(n_boot):
+                months = rng.integers(0, n_months, n_months)
+                Xb = blocks[:, months].reshape(n, -1)
+                ari.append(adjusted_rand_score(model.labels_, fit(Xb, k, seed + 1 + b).labels_))
+            row |= {
+                "rms_days": float(np.sqrt(model.inertia_ / n)),
+                "silhouette": float(silhouette_score(X, model.labels_)),
+                "stability": float(np.mean(ari)),
+                "stability_p10": float(np.quantile(ari, 0.1)),
+            }
+        rows.append(row)
+    return pl.DataFrame(rows)
+
+
+def trip_embeddings(data: dict, levels: int = 100):
+    """Wasserstein embeddings of all the trips of ``trip_explorer_data`` and
+    the number of trip-months without seats that were filled."""
+    import numpy as np
+
+    embedded = [wasserstein_embedding(t["probability"], levels) for t in data["trips"]]
+    return np.stack([e for e, _ in embedded]), sum(n for _, n in embedded)
+
+
 def cluster_trip_data(data: dict, k: int, levels: int = 100, seed: int = 0) -> dict:
     """k-means of the trips of ``trip_explorer_data`` with the Wasserstein-2
     distance between their (month x days before) matrices.
@@ -1169,8 +1252,7 @@ def cluster_trip_data(data: dict, k: int, levels: int = 100, seed: int = 0) -> d
     from sklearn.metrics import silhouette_score
 
     n_months = len(data["months"])
-    embedded = [wasserstein_embedding(t["probability"], levels) for t in data["trips"]]
-    X = np.stack([e for e, _ in embedded])
+    X, filled_months = trip_embeddings(data, levels)
     model = KMeans(n_clusters=k, n_init=20, random_state=seed).fit(X)
 
     order = np.argsort(-np.bincount(model.labels_, minlength=k), kind="stable")
@@ -1190,7 +1272,7 @@ def cluster_trip_data(data: dict, k: int, levels: int = 100, seed: int = 0) -> d
         ],
         "median_day": np.median(quantiles, axis=2),  # (group, month)
         "silhouette": float(silhouette_score(X, model.labels_)),
-        "filled_months": sum(n for _, n in embedded),
+        "filled_months": filled_months,
         "model": model,
         "X": X,
     }
@@ -1198,10 +1280,19 @@ def cluster_trip_data(data: dict, k: int, levels: int = 100, seed: int = 0) -> d
 
 @app.command()
 def cluster_trips(
-    k: int = typer.Option(4, help="Number of clusters."),
+    k: int = typer.Option(
+        6, help="Number of clusters (6: most stable in --choose-k, Nov. 2026)."
+    ),
     n_trips: int = typer.Option(100, help="Number of trips (with the most seats) to cluster."),
     levels: int = typer.Option(100, help="Quantile levels per month in the embedding."),
     seed: int = typer.Option(0, help="Random seed of k-means."),
+    choose: bool = typer.Option(
+        False,
+        "--choose-k",
+        help="Only print the scores to choose k (gap statistic, silhouette, "
+        "bootstrap stability) for k = 1..--max-k, without clustering.",
+    ),
+    max_k: int = typer.Option(12, help="Largest k tried by --choose-k."),
 ):
     """Cluster trips by their full (days before departure x month) matrix,
     with k-means on the Wasserstein-2 distance between booking-day
@@ -1209,31 +1300,44 @@ def cluster_trips(
 
     Two trips are close when, month by month, their seats appear at the same
     number of days before departure, whatever their overall availability.
-    Prints k-means inertia and silhouette for k = 2..8 to help choose k, then
-    writes ``trip_clusters.csv`` and ``trip_clusters.svg`` (barycenter of
-    each cluster) to ``data/generated``.
+    Writes ``trip_clusters.csv`` and ``trip_clusters.svg`` (barycenter of
+    each cluster) to ``data/generated``. With ``--choose-k``, prints the
+    scores of ``choose_k`` instead and writes them to ``choose_k.csv``.
     """
-    import numpy as np
-    from sklearn.cluster import KMeans
-    from sklearn.metrics import silhouette_score
-
     data = trip_explorer_data(n_trips)
     trips, months = data["trips"], data["months"]
+
+    if choose:
+        X, filled = trip_embeddings(data, levels)
+        print(
+            f"{len(trips)} trips x {len(months)} months, {filled} "
+            "trip-months without seats filled with the trip's average"
+        )
+        scores = choose_k(X, len(months), max_k=max_k, seed=seed)
+        scores.write_csv(generated_file("choose_k.csv"))
+        with pl.Config(tbl_rows=-1, float_precision=3):
+            print(scores)
+
+        gap, sd = scores["gap"].to_list(), scores["gap_sd"].to_list()
+        gap_k = next(
+            (i + 1 for i in range(len(gap) - 1) if gap[i] >= gap[i + 1] - sd[i + 1]),
+            None,
+        )
+        tried = scores.filter(pl.col("k") >= 2)
+        print(
+            "Gap statistic (smallest k with gap(k) >= gap(k+1) - sd(k+1)): "
+            + (f"k = {gap_k}" if gap_k else f"no k up to {max_k}")
+        )
+        print(f"Best silhouette: k = {tried.sort('silhouette')['k'][-1]}")
+        print(f"Most stable: k = {tried.sort('stability')['k'][-1]}")
+        return
+
     result = cluster_trip_data(data, k=k, levels=levels, seed=seed)
-    X = result["X"]
     print(
         f"{len(trips)} trips x {len(months)} months, {result['filled_months']} "
-        "trip-months without seats filled with the trip's average"
+        f"trip-months without seats filled with the trip's average, "
+        f"silhouette {result['silhouette']:.3f}"
     )
-
-    # Inertia is a sum of squared distances: report the RMS distance in days
-    print("k  RMS distance to centroid (days)  silhouette")
-    for n in range(2, 9):
-        model = KMeans(n_clusters=n, n_init=20, random_state=seed).fit(X)
-        print(
-            f"{n}  {np.sqrt(model.inertia_ / len(X)):31.2f}  "
-            f"{silhouette_score(X, model.labels_):10.3f}"
-        )
 
     clusters = pl.DataFrame(
         {

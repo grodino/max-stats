@@ -145,6 +145,7 @@ input, select, button { font: inherit; color: var(--ink); }
 .method { display: grid; gap: 0.5rem; max-width: 42rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 1.25rem; }
 .method p { margin: 0; }
 .method h3 { color: var(--ink); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; background: var(--surface); padding: 0.05em 0.3em; border-radius: 4px; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
 </style>
 
@@ -234,7 +235,7 @@ input, select, button { font: inherit; color: var(--ink); }
     <h3>Méthode</h3>
     <p>Une observation est un train vu dans une des recherches quotidiennes du jeu de données SNCF, entre 0 et 30 jours avant son départ. La probabilité d'une case est la part des trains du mois qui avaient une place MAXJEUNE à ce nombre de jours du départ. Les cars, les trains internationaux et les OUIGO sont exclus.</p>
     <p>Les couleurs comparent chaque jour au meilleur jour du même mois, ce qui efface les variations saisonnières du niveau général. Le classement des trajets compte toutes les observations avec une place sur l'historique.</p>
-    <p>Groupes : chaque mois d'un trajet devient une distribution de ses places sur les 31 jours avant le départ, quel que soit leur nombre. Deux trajets sont proches quand, mois par mois, leurs places apparaissent au même moment (distance de Wasserstein, en jours). Les groupes sont trouvés par k-means ; le barycentre est le profil moyen au sens de cette distance, et l'écart d'un trajet est sa distance au barycentre de son groupe.</p>
+    <p>Groupes : chaque mois d'un trajet devient une distribution de ses places sur les 31 jours avant le départ, quel que soit leur nombre. Deux trajets sont proches quand, mois par mois, leurs places apparaissent au même moment (distance de Wasserstein, en jours). Les groupes sont trouvés par k-means ; le barycentre est le profil moyen au sens de cette distance, et l'écart d'un trajet est sa distance au barycentre de son groupe. Le nombre de groupes est celui qui donne les groupes les plus stables quand on rééchantillonne les mois (indice de Rand ajusté), parmi 2 à 12 groupes (<code>uv run main.py cluster-trips --choose-k</code>). La silhouette et la statistique du gap augmentent sans pic jusqu'à 12 groupes : les trajets se regroupent surtout par ligne.</p>
     <p id="method-window"></p>
   </section>
 </main>
