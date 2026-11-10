@@ -503,6 +503,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     tabs.appendChild(b);
   });
 
+  // The barycenter is named after the group's most typical trip (closest to it)
+  function barycenterName(g) { return "B-" + tripLabel(g.members[0]); }
+
   var currentGroup = null;
   var currentMember = null; // null: the group's barycenter is shown
 
@@ -534,8 +537,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
         dec1.format(t.cluster_distance) + " jour" + (t.cluster_distance >= 2 ? "s" : "") + " · rang " + t.rank;
       groupChart.draw(tripSpec(t));
     } else {
-      $("view-title").textContent = groupName(currentGroup) + " : barycentre de " + g.members.length + " trajets";
-      $("view-sub").textContent = "Part des places du mois apparues à chaque jour avant le départ, rapportée au jour le plus fourni du mois. Choisissez un trajet dans la liste pour le comparer.";
+      $("view-title").textContent = barycenterName(g);
+      $("view-sub").textContent = "Barycentre du " + groupName(currentGroup).toLowerCase() + " (" + g.members.length +
+        " trajets), nommé d'après son trajet le plus typique. Part des places du mois apparues à chaque jour avant le départ, " +
+        "rapportée au jour le plus fourni du mois. Choisissez un trajet dans la liste pour le comparer.";
       groupChart.draw({
         values: g.matrix, ref: g.ref, markers: g.markers,
         tip: function (mi, d) {
@@ -581,7 +586,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     $("members-count").textContent = g.members.length + " trajets, du plus typique au moins typique";
     var list = $("member-list");
     list.textContent = "";
-    list.appendChild(memberButton("Barycentre du groupe", "centre", currentMember === null,
+    list.appendChild(memberButton(barycenterName(g), "centre", currentMember === null,
       function () { showMember(null); }, "centre"));
     g.members.forEach(function (t) {
       var li = memberButton(tripLabel(t), "#" + t.rank + " \u00b7 " + dec1.format(t.cluster_distance) + " j",
