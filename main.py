@@ -1085,6 +1085,164 @@ def trip_explorer(
     print(f"{len(data['trips'])} trips, page written to {output} ({len(page) / 1e6:.1f} MB)")
 
 
+def wasserstein_embedding(probability: list[list[float | None]], levels: int):
+    """Embed a trip's (month x days before) matrix so that Euclidean distances
+    are Wasserstein-2 distances.
+
+    Each month's row is turned into a distribution over the booking days
+    (0-30): the share of the month's seats seen at each number of days before
+    departure. On a line, the Wasserstein-2 distance between two distributions
+    is the L2 distance between their quantile functions, so each month is
+    represented by its quantile function sampled at ``levels`` evenly spaced
+    levels. The squared Euclidean distance between two embeddings is then the
+    mean, over months, of the squared Wasserstein-2 distance (in days), and
+    the mean of several embeddings is their Wasserstein barycenter: plain
+    k-means clusters the trips with this distance.
+
+    Months without any seat have no distribution: they take the trip's
+    average distribution over its other months. Returns the embedding and
+    the number of filled months.
+    """
+    import numpy as np
+
+    seats = np.array(probability, dtype=float)  # None -> nan
+    seats = np.nan_to_num(seats, nan=0.0)
+    mass = seats.sum(axis=1)
+    observed = mass > 0
+    distribution = np.empty_like(seats)
+    distribution[observed] = seats[observed] / mass[observed, None]
+    distribution[~observed] = distribution[observed].mean(axis=0)
+
+    cdf = np.cumsum(distribution, axis=1)
+    cdf[:, -1] = 1.0  # rounding errors would push the last quantiles past 30
+    u = (np.arange(levels) + 0.5) / levels
+    quantiles = np.stack([np.searchsorted(row, u) for row in cdf]).astype(float)
+    return quantiles.ravel() / np.sqrt(quantiles.size), int((~observed).sum())
+
+
+@app.command()
+def cluster_trips(
+    k: int = typer.Option(4, help="Number of clusters."),
+    n_trips: int = typer.Option(100, help="Number of trips (with the most seats) to cluster."),
+    levels: int = typer.Option(100, help="Quantile levels per month in the embedding."),
+    seed: int = typer.Option(0, help="Random seed of k-means."),
+):
+    """Cluster trips by their full (days before departure x month) matrix,
+    with k-means on the Wasserstein-2 distance between booking-day
+    distributions (see ``wasserstein_embedding``).
+
+    Two trips are close when, month by month, their seats appear at the same
+    number of days before departure, whatever their overall availability.
+    Prints k-means inertia and silhouette for k = 2..8 to help choose k, then
+    writes ``trip_clusters.csv`` and ``trip_clusters.svg`` (barycenter of
+    each cluster) to ``data/generated``.
+    """
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+
+    data = trip_explorer_data(n_trips)
+    trips, months = data["trips"], data["months"]
+    embedded = [wasserstein_embedding(t["probability"], levels) for t in trips]
+    X = np.stack([e for e, _ in embedded])
+    filled = sum(n for _, n in embedded)
+    print(
+        f"{len(trips)} trips x {len(months)} months, "
+        f"{filled} trip-months without seats filled with the trip's average"
+    )
+
+    def fit(n_clusters: int) -> KMeans:
+        return KMeans(n_clusters=n_clusters, n_init=20, random_state=seed).fit(X)
+
+    # Inertia is a sum of squared distances: report the RMS distance in days
+    print("k  RMS distance to centroid (days)  silhouette")
+    for n in range(2, 9):
+        model = fit(n)
+        print(
+            f"{n}  {np.sqrt(model.inertia_ / len(X)):31.2f}  "
+            f"{silhouette_score(X, model.labels_):10.3f}"
+        )
+
+    model = fit(k)
+    distance = np.linalg.norm(X - model.cluster_centers_[model.labels_], axis=1)
+    # Number clusters by size, largest first
+    order = np.argsort(-np.bincount(model.labels_, minlength=k), kind="stable")
+    relabel = np.empty(k, dtype=int)
+    relabel[order] = np.arange(k)
+    labels = relabel[model.labels_]
+    centers = model.cluster_centers_[order]
+
+    clusters = pl.DataFrame(
+        {
+            "origin": [t["origin"] for t in trips],
+            "destination": [t["destination"] for t in trips],
+            "rank": [t["rank"] for t in trips],
+            "available": [t["available"] for t in trips],
+            "cluster": labels,
+            "distance_days": distance.round(2),
+        }
+    ).sort("cluster", "distance_days")
+    clusters.write_csv(generated_file("trip_clusters.csv"))
+
+    # Barycenters back to distributions: share of the quantile levels on each day
+    quantiles = centers.reshape(k, len(months), levels) * np.sqrt(len(months) * levels)
+    days = np.arange(31)
+    rows = []
+    for c in range(k):
+        for m, month in enumerate(months):
+            q = quantiles[c, m]
+            share = np.histogram(q, bins=np.arange(32) - 0.5)[0] / levels
+            rows += [
+                {"cluster": c, "month": f"{month}-01", "days_before": int(d), "share": float(s)}
+                for d, s in zip(days, share)
+            ]
+    barycenters = pl.DataFrame(rows).with_columns(pl.col("month").str.to_date())
+
+    with pl.Config(tbl_rows=-1, fmt_str_lengths=40):
+        for c in range(k):
+            members = clusters.filter(pl.col("cluster") == c)
+            median_day = np.median(quantiles[c], axis=1)  # per month
+            recent = median_day[-6:]
+            print(
+                f"\nCluster {c}: {len(members)} trips, median booking day of the seats "
+                f"over the last 6 months: {', '.join(f'{d:.0f}' for d in recent)}"
+            )
+            print(members.select("rank", "origin", "destination", "distance_days").head(8))
+
+    plot = (
+        alt.Chart(barycenters, title="Barycentre de chaque groupe de trajets (Wasserstein)")
+        .mark_rect()
+        .encode(
+            x=alt.X(
+                "yearmonth(month):O",
+                title="Mois de départ",
+                axis=alt.Axis(format="%b %y", labelAngle=-45),
+            ),
+            y=alt.Y(
+                "days_before:O",
+                title="Jours avant le départ",
+                sort="descending",
+                axis=alt.Axis(values=list(range(0, 31, 5))),
+            ),
+            color=alt.Color(
+                "share:Q",
+                title="Part des places du mois",
+                scale=alt.Scale(range=THEME["ramp"]),
+                legend=alt.Legend(format=".0%", orient="right"),
+            ),
+            facet=alt.Facet(
+                "cluster:N",
+                title=None,
+                columns=2,
+                header=alt.Header(labelExpr="'Groupe ' + datum.value", labelFontSize=12),
+            ),
+        )
+        .properties(width=320, height=200)
+    )
+    plot.save(generated_file("trip_clusters.svg"))
+    print(f"\nClusters written to {generated_file('trip_clusters.csv')} and trip_clusters.svg")
+
+
 @app.command()
 def name_changes():
     """Print iata codes that have multiple names.

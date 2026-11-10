@@ -9,6 +9,7 @@ dependencies = [
     "matplotlib>=3.11.2",
     "polars>=2.1.0",
     "pyarrow>=26.0.1",
+    "scikit-learn>=1.7",
     "skrub>=0.11.0",
     "sqlalchemy>=2.1.8",
     "typer>=0.27.3",
