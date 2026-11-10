@@ -41,7 +41,7 @@ body { background: var(--bg); color: var(--ink); font-family: var(--font); font-
   padding-left: max(16px, env(safe-area-inset-left, 0px));
   padding-right: max(16px, env(safe-area-inset-right, 0px));
   padding-block: 2rem 3rem;
-  display: grid; gap: 2rem;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 2rem;
 }
 .intro { display: grid; gap: 0.5rem; max-width: 42rem; }
 .eyebrow { margin: 0; color: var(--muted); font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; }
@@ -50,7 +50,7 @@ h2 { margin: 0; font-size: var(--step-2); line-height: 1.25; font-weight: 600; t
 h3 { margin: 0; font-size: var(--step-1); font-weight: 600; }
 .lede { margin: 0; color: var(--muted); font-size: var(--step-1); }
 
-.picker { display: grid; gap: 0.5rem; }
+.picker { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
 .picker label { font-weight: 600; }
 .picker-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .picker input, .picker select, .picker button {
@@ -65,14 +65,14 @@ h3 { margin: 0; font-size: var(--step-1); font-weight: 600; }
 .picker :focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .hint { margin: 0; color: var(--muted); }
 
-.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .stat { background: var(--bg); padding: 1rem 1.1rem; display: grid; gap: 0.2rem; align-content: start; }
 .stat-label { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; }
 .stat-value { font-size: var(--step-3); font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .stat-value.accent { color: var(--accent); }
 .stat-note { color: var(--muted); }
 
-.chart-block { display: grid; gap: 0.75rem; min-width: 0; }
+.chart-block { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }
 .chart-head { display: grid; gap: 0.25rem; }
 .chart-sub { margin: 0; color: var(--muted); }
 .legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; align-items: center; color: var(--muted); font-size: 0.8125rem; }
@@ -208,10 +208,18 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   var byKey = {};
   trips.forEach(function (t) { byKey[key(t)] = t; });
 
-  // Station names are upper case in the data: "BORDEAUX ST JEAN" -> "Bordeaux St Jean"
+  // Station names are upper case in the data:
+  // "AIX EN PROVENCE TGV" -> "Aix en Provence TGV"
+  var SMALL = { en: 1, de: 1, du: 1, des: 1, la: 1, le: 1, les: 1, sur: 1, sous: 1, et: 1, "l": 1, "d": 1 };
+  var UPPER = { tgv: 1, cdg: 1 };
   function pretty(name) {
-    return name.toLowerCase().replace(/(^|[\s\-'])([a-zà-ÿ])/g, function (_, sep, c) {
-      return sep + c.toUpperCase();
+    var i = 0;
+    return name.toLowerCase().replace(/[a-zà-ÿ]+/g, function (word, offset) {
+      var first = i++ === 0;
+      if (UPPER[word]) return word.toUpperCase();
+      if (name.charAt(offset - 1) === "(") return word;
+      if (!first && SMALL[word]) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1);
     });
   }
   function tripLabel(t) { return pretty(t.origin) + " → " + pretty(t.destination); }

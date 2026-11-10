@@ -991,20 +991,11 @@ def trip_explorer_data(n_trips: int) -> dict:
 
     Trips are origin and destination names as written in the data, ranked by
     the number of observations (train leg x daily snapshot, full history) that
-    had a MAXJEUNE seat. The monthly tables are then computed for those trips
-    only, keeping their rows with ``trip_filter``.
+    had a MAXJEUNE seat. A trip's numbers are the same as those of
+    ``best-time-evolution --origin <origin> --destination <destination>``,
+    but all trips are computed in a single pass (filtering each trip with
+    ``trip_filter`` takes about 2s per snapshot for 100 trips).
     """
-    trip = pl.struct(origin=pl.col("origine"), destination=pl.col("destination"))
-    ranking = (
-        booking_lead_time_table(condition=trip, split_periods=False)
-        .unnest("condition")
-        .group_by("origin", "destination")
-        .agg(pl.col("available", "total").sum())
-        .sort(["available", "total", "origin"], descending=[True, True, False])
-        .head(n_trips)
-    )
-    trips = list(ranking.select("origin", "destination").iter_rows())
-
     table = booking_lead_time_table(
         condition=pl.struct(
             origin=pl.col("origine"),
@@ -1012,10 +1003,21 @@ def trip_explorer_data(n_trips: int) -> dict:
             month=pl.col("date").dt.truncate("1mo"),
         ),
         split_periods=False,
-        where=pl.any_horizontal(trip_filter(o, d) for o, d in trips),
+    ).unnest("condition")
+    ranking = (
+        # Legs between two stations of the same city (Lyon Part-Dieu ->
+        # Perrache, both "LYON (intramuros)") are not trips
+        table.filter(pl.col("origin") != pl.col("destination"))
+        .group_by("origin", "destination")
+        .agg(pl.col("available", "total").sum())
+        .sort(["available", "total", "origin"], descending=[True, True, False])
+        .head(n_trips)
     )
-    best = best_booking_time(table).unnest("condition")
-    table = table.unnest("condition")
+    trips = ["origin", "destination"]
+    table = table.join(ranking.select(trips), on=trips, how="semi").with_columns(
+        condition=pl.struct(*trips, "month")
+    )
+    best = best_booking_time(table.drop(*trips, "month")).unnest("condition")
     months = sorted(table["month"].unique().to_list())
     month_index = {month: i for i, month in enumerate(months)}
 
