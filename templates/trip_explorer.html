@@ -142,6 +142,28 @@ input, select, button { font: inherit; color: var(--ink); }
 @media (max-width: 760px) { .group-panel { grid-template-columns: minmax(0, 1fr); } }
 @media (min-width: 761px) { .members { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 1rem); } }
 
+/* Hubs */
+.hubs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; border-top: 1px solid var(--line); padding-top: 2rem; }
+.hub-controls { display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; align-items: center; justify-content: space-between; }
+.segmented { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 2px; background: var(--surface); }
+.segmented button { background: none; border: 0; border-radius: 999px; padding: 0.35rem 0.9rem; cursor: pointer; color: var(--muted); }
+.segmented button[aria-pressed="true"] { background: var(--bg); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+.hub-view { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }
+.fact-value.week { color: var(--r4); }
+.fact-value.weekend { color: var(--accent); }
+.swatch-line { width: 1.2rem; height: 3px; border-radius: 2px; display: inline-block; }
+.swatch-line.week { background: var(--r4); }
+.swatch-line.weekend { background: var(--accent); }
+.swatch-band { width: 1.2rem; height: 0.7rem; display: inline-block; background: var(--muted); opacity: 0.25; }
+.grid-line { stroke: var(--line); stroke-width: 1; }
+.series-band { stroke: none; opacity: 0.18; }
+.series-line { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.series-band.week { fill: var(--r4); } .series-band.weekend { fill: var(--accent); }
+.series-line.week { stroke: var(--r4); } .series-line.weekend { stroke: var(--accent); }
+.series-dot { stroke: var(--bg); stroke-width: 1.5; }
+.series-dot.week { fill: var(--r4); } .series-dot.weekend { fill: var(--accent); }
+.rule { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+
 .method { display: grid; gap: 0.5rem; max-width: 42rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 1.25rem; }
 .method p { margin: 0; }
 .method h3 { color: var(--ink); }
@@ -197,6 +219,33 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     </div>
     <div class="legend" data-legend="Meilleur jour"></div>
     <div class="chart" id="trip-chart"></div>
+  </section>
+
+  <section class="hubs" id="hubs" aria-labelledby="hubs-title">
+    <div class="chart-head">
+      <h2 id="hubs-title">Par grande ville</h2>
+      <p class="chart-sub" id="hubs-sub"></p>
+    </div>
+    <div class="hub-controls">
+      <div class="group-tabs" id="hub-tabs" role="group" aria-label="Ville"></div>
+      <div class="segmented" id="direction-toggle" role="group" aria-label="Sens">
+        <button type="button" id="direction-departures" data-direction="Départs" aria-pressed="true">Départs</button>
+        <button type="button" id="direction-arrivals" data-direction="Arrivées" aria-pressed="false">Arrivées</button>
+      </div>
+    </div>
+    <div class="hub-view" id="hub-view">
+      <h3 id="hub-title">—</h3>
+      <div class="group-facts" id="hub-facts">
+        <div class="fact"><span class="fact-value week" id="hub-week">—</span><span class="fact-label">Meilleur jour, départs en semaine</span></div>
+        <div class="fact"><span class="fact-value weekend" id="hub-weekend">—</span><span class="fact-label">Meilleur jour, départs le week-end</span></div>
+      </div>
+      <div class="legend">
+        <span class="legend-item"><span class="swatch-line week"></span>Semaine (lundi-vendredi)</span>
+        <span class="legend-item"><span class="swatch-line weekend"></span>Week-end (samedi-dimanche)</span>
+        <span class="legend-item"><span class="swatch-band"></span>± un écart-type</span>
+      </div>
+      <div class="chart" id="hub-chart"></div>
+    </div>
   </section>
 
   <section class="groups" id="groups" aria-labelledby="groups-title">
@@ -684,6 +733,178 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 
     tripChart.draw(tripSpec(trip));
   }
+
+  /* Hubs: trips with a seat by days before departure, weekday vs weekend.
+     spec = { series: [{cls, label, mean, lower, upper, std}] }, arrays indexed by days before (0-30) */
+  var HUBS = DATA.hubs;
+  var nf0 = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 });
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  function niceStep(max) {
+    var raw = max / 4, power = Math.pow(10, Math.floor(Math.log10(raw)));
+    var n = raw / power;
+    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * power;
+  }
+
+  function LineChart(container, label) {
+    this.container = container;
+    this.svg = document.createElementNS(SVG_NS, "svg");
+    this.svg.setAttribute("role", "img");
+    this.svg.setAttribute("aria-label", label);
+    this.tip = document.createElement("div");
+    this.tip.className = "tooltip";
+    this.tip.hidden = true;
+    container.appendChild(this.svg);
+    container.appendChild(this.tip);
+    var self = this, lastWidth = 0;
+    this.svg.addEventListener("pointermove", function (e) { self.showTip(e); });
+    this.svg.addEventListener("pointerdown", function (e) { self.showTip(e); });
+    this.svg.addEventListener("pointerleave", function (e) { if (e.pointerType === "mouse") self.hideTip(); });
+    if (window.ResizeObserver) {
+      new ResizeObserver(function () {
+        var w = container.clientWidth;
+        if (w !== lastWidth) { lastWidth = w; if (self.spec) self.draw(self.spec); }
+      }).observe(container);
+    }
+  }
+
+  LineChart.prototype.draw = function (spec) {
+    this.spec = spec;
+    var width = Math.max(this.container.clientWidth, 260);
+    var height = width < 560 ? 230 : 280;
+    var m = { t: 12, r: 14, b: 40, l: 48 };
+    var iw = width - m.l - m.r, ih = height - m.t - m.b;
+    var top = 0;
+    spec.series.forEach(function (s) { s.upper.forEach(function (v) { if (v !== null && v > top) top = v; }); });
+    var step = niceStep(top || 1);
+    top = Math.ceil(top / step) * step || step;
+    function x(d) { return m.l + (30 - d) / 30 * iw; }
+    function y(v) { return m.t + ih - v / top * ih; }
+    this.geom = { m: m, iw: iw, x: x, y: y };
+
+    var out = [];
+    for (var v = 0; v <= top + 1e-9; v += step) {
+      out.push('<line class="grid-line" x1="' + m.l + '" x2="' + (m.l + iw) + '" y1="' + y(v).toFixed(1) + '" y2="' + y(v).toFixed(1) + '"></line>');
+      out.push('<text class="tick" x="' + (m.l - 6) + '" y="' + y(v).toFixed(1) + '" dy="0.35em" text-anchor="end">' + nf0.format(v) + '</text>');
+    }
+    for (var d = 30; d >= 0; d -= 5) {
+      out.push('<text class="tick" x="' + x(d).toFixed(1) + '" y="' + (m.t + ih + 16) + '" text-anchor="middle">' + d + '</text>');
+    }
+    out.push('<text class="axis-title" x="' + (m.l + iw / 2) + '" y="' + (height - 4) + '" text-anchor="middle">Jours avant le départ</text>');
+    out.push('<text class="axis-title" transform="translate(11,' + (m.t + ih / 2) + ') rotate(-90)" text-anchor="middle">Trajets avec une place</text>');
+    function path(values, from, to, dir) {
+      var pts = [];
+      for (var d = from; dir > 0 ? d <= to : d >= to; d += dir) {
+        if (values[d] !== null) pts.push(x(d).toFixed(1) + "," + y(values[d]).toFixed(1));
+      }
+      return pts;
+    }
+    spec.series.forEach(function (s) {
+      var band = path(s.upper, 0, 30, 1).concat(path(s.lower, 30, 0, -1));
+      out.push('<path class="series-band ' + s.cls + '" d="M' + band.join("L") + 'Z"></path>');
+    });
+    spec.series.forEach(function (s) {
+      out.push('<path class="series-line ' + s.cls + '" d="M' + path(s.mean, 0, 30, 1).join("L") + '"></path>');
+    });
+    out.push('<path class="domain" d="M' + m.l + ',' + m.t + 'V' + (m.t + ih) + 'H' + (m.l + iw) + '"></path>');
+    out.push('<g class="hover-layer" visibility="hidden"><line class="rule" y1="' + m.t + '" y2="' + (m.t + ih) + '"></line>' +
+      spec.series.map(function (s) { return '<circle class="series-dot ' + s.cls + '" r="4"></circle>'; }).join("") + '</g>');
+
+    this.svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+    this.svg.setAttribute("width", width);
+    this.svg.setAttribute("height", height);
+    this.svg.innerHTML = out.join("");
+    this.hover = this.svg.lastChild;
+    this.hideTip();
+  };
+
+  LineChart.prototype.hideTip = function () {
+    this.tip.hidden = true;
+    if (this.hover) this.hover.setAttribute("visibility", "hidden");
+  };
+
+  LineChart.prototype.showTip = function (evt) {
+    if (!this.spec) return;
+    var g = this.geom, box = this.svg.getBoundingClientRect();
+    var scale = box.width / Number(this.svg.getAttribute("width"));
+    var px = (evt.clientX - box.left) / scale;
+    var d = Math.round(30 - (px - g.m.l) / g.iw * 30);
+    if (d < 0 || d > 30) { this.hideTip(); return; }
+    var rule = this.hover.firstChild;
+    rule.setAttribute("x1", g.x(d));
+    rule.setAttribute("x2", g.x(d));
+    var dots = this.hover.querySelectorAll("circle");
+    this.spec.series.forEach(function (s, i) {
+      var v = s.mean[d];
+      dots[i].setAttribute("visibility", v === null ? "hidden" : "visible");
+      if (v !== null) { dots[i].setAttribute("cx", g.x(d)); dots[i].setAttribute("cy", g.y(v)); }
+    });
+    this.hover.setAttribute("visibility", "visible");
+
+    var tip = this.tip;
+    tip.textContent = "";
+    var head = document.createElement("strong");
+    head.textContent = dayLabel(d);
+    tip.appendChild(head);
+    this.spec.series.forEach(function (s) {
+      var line = document.createElement("span");
+      line.textContent = s.mean[d] === null ? s.label + " : pas observé"
+        : s.label + " : " + nf0.format(s.mean[d]) + " trajets (± " + nf0.format(s.std[d] || 0) + ")";
+      tip.appendChild(line);
+    });
+    tip.hidden = false;
+    var cbox = this.container.getBoundingClientRect();
+    var tx = evt.clientX - cbox.left + 14, ty = evt.clientY - cbox.top + 14;
+    if (tx + tip.offsetWidth > cbox.width) tx = evt.clientX - cbox.left - tip.offsetWidth - 14;
+    if (tx < 0) tx = 0;
+    tip.style.left = tx + "px";
+    tip.style.top = ty + "px";
+  };
+
+  var hubChart = new LineChart($("hub-chart"), "Trajets avec une place MAXJEUNE selon le jour de réservation");
+  var currentHub = HUBS.hubs[0], currentDirection = "Départs";
+  var hubTabs = $("hub-tabs");
+  HUBS.hubs.forEach(function (hub, i) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "group-tab";
+    b.id = "hub-tab-" + i;
+    b.textContent = hub;
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", function () { currentHub = hub; renderHub(); });
+    hubTabs.appendChild(b);
+  });
+  Array.prototype.forEach.call($("direction-toggle").children, function (b) {
+    b.addEventListener("click", function () { currentDirection = b.getAttribute("data-direction"); renderHub(); });
+  });
+
+  function bestDay(s) {
+    var best = null;
+    s.mean.forEach(function (v, d) { if (v !== null && (best === null || v > s.mean[best] || (v === s.mean[best] && d > best))) best = d; });
+    return best;
+  }
+
+  function renderHub() {
+    Array.prototype.forEach.call(hubTabs.children, function (b) { b.setAttribute("aria-pressed", String(b.textContent === currentHub)); });
+    Array.prototype.forEach.call($("direction-toggle").children, function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-direction") === currentDirection));
+    });
+    var data = HUBS.series[currentHub][currentDirection];
+    var week = data["Semaine"], weekend = data["Week-end"];
+    $("hub-title").textContent = (currentDirection === "Départs" ? "Départs de " : "Arrivées à ") + currentHub;
+    [["hub-week", week], ["hub-weekend", weekend]].forEach(function (pair) {
+      var d = bestDay(pair[1]);
+      $(pair[0]).textContent = d === null ? "—" : dayLabel(d) + " · " + nf0.format(pair[1].mean[d]) + " trajets";
+    });
+    $("hubs-sub").textContent = "Nombre moyen de trajets avec une place MAXJEUNE selon le jour de réservation, " +
+      HUBS.period.toLowerCase() + " (" + week.departure_dates + " jours de départ en semaine, " + weekend.departure_dates +
+      " le week-end). Un trajet est un tronçon de train : un Paris → Lyon → Marseille compte pour plusieurs trajets au départ de Paris.";
+    hubChart.draw({ series: [
+      { cls: "week", label: "Semaine", mean: week.mean, lower: week.lower, upper: week.upper, std: week.std },
+      { cls: "weekend", label: "Week-end", mean: weekend.mean, lower: weekend.lower, upper: weekend.upper, std: weekend.std }
+    ] });
+  }
+  renderHub();
 
   // Start on the remembered trip, or the trip with the most seats
   fillSelect("");
