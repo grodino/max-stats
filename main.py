@@ -540,13 +540,16 @@ def booking_lead_time_table(
             .collect(engine="streaming")
         )
 
-    return (
-        pl.concat(map(snapshot_counts, sorted(MAXJEUNE_FOLDER.glob("*.parquet"))))
-        .group_by(keys)
-        .agg(pl.col("available", "total").sum())
-        .with_columns(probability=pl.col("available") / pl.col("total"))
-        .sort(keys)
+    def merge(counts: list[pl.DataFrame]) -> pl.DataFrame:
+        return pl.concat(counts).group_by(keys).agg(pl.col("available", "total").sum())
+
+    # Sum the snapshots by batches: with a fine-grained condition (e.g. one
+    # value per trip), concatenating all of them first does not fit in memory.
+    files = sorted(MAXJEUNE_FOLDER.glob("*.parquet"))
+    counts = merge(
+        [merge([snapshot_counts(f) for f in files[i : i + 50]]) for i in range(0, len(files), 50)]
     )
+    return counts.with_columns(probability=pl.col("available") / pl.col("total")).sort(keys)
 
 
 @app.command()
@@ -981,6 +984,103 @@ def best_time_evolution(
                 "observations",
             )
         )
+
+
+def trip_explorer_data(n_trips: int) -> dict:
+    """Monthly best time to book of the ``n_trips`` trips with the most seats.
+
+    Trips are origin and destination names as written in the data, ranked by
+    the number of observations (train leg x daily snapshot, full history) that
+    had a MAXJEUNE seat. The monthly tables are then computed for those trips
+    only, keeping their rows with ``trip_filter``.
+    """
+    trip = pl.struct(origin=pl.col("origine"), destination=pl.col("destination"))
+    ranking = (
+        booking_lead_time_table(condition=trip, split_periods=False)
+        .unnest("condition")
+        .group_by("origin", "destination")
+        .agg(pl.col("available", "total").sum())
+        .sort(["available", "total", "origin"], descending=[True, True, False])
+        .head(n_trips)
+    )
+    trips = list(ranking.select("origin", "destination").iter_rows())
+
+    table = booking_lead_time_table(
+        condition=pl.struct(
+            origin=pl.col("origine"),
+            destination=pl.col("destination"),
+            month=pl.col("date").dt.truncate("1mo"),
+        ),
+        split_periods=False,
+        where=pl.any_horizontal(trip_filter(o, d) for o, d in trips),
+    )
+    best = best_booking_time(table).unnest("condition")
+    table = table.unnest("condition")
+    months = sorted(table["month"].unique().to_list())
+    month_index = {month: i for i, month in enumerate(months)}
+
+    result = []
+    for rank, row in enumerate(ranking.iter_rows(named=True), start=1):
+        in_trip = (pl.col("origin") == row["origin"]) & (
+            pl.col("destination") == row["destination"]
+        )
+        # probability[month][days_before], null when the cell was not observed
+        probability = [[None] * 31 for _ in months]
+        for cell in table.filter(in_trip, pl.col("days_before") <= 30).iter_rows(named=True):
+            probability[month_index[cell["month"]]][cell["days_before"]] = round(
+                cell["probability"], 4
+            )
+        result.append(
+            {
+                "origin": row["origin"],
+                "destination": row["destination"],
+                "rank": rank,
+                "available": row["available"],
+                "total": row["total"],
+                "probability": probability,
+                "best": [
+                    {
+                        "month": month_index[b["month"]],
+                        "best": b["best_days_before"],
+                        "second": b["second_best_days_before"],
+                        "probability": round(b["best_probability"], 4),
+                        "observations": b["observations"],
+                    }
+                    for b in best.filter(in_trip).sort("month").iter_rows(named=True)
+                ],
+            }
+        )
+
+    requests = has_missing_requests()
+    return {
+        "generated": f"{requests['requests_end']:%Y-%m-%d}",
+        "departures_from": f"{requests['requests_start'] + timedelta(days=31):%Y-%m-%d}",
+        "months": [f"{month:%Y-%m}" for month in months],
+        "trips": result,
+    }
+
+
+@app.command()
+def trip_explorer(
+    n_trips: int = typer.Option(100, help="Number of trips to include."),
+    output: Path = typer.Option(
+        GENERATED_FOLDER / "trip_explorer.html", help="HTML page to write."
+    ),
+):
+    """Interactive page to pick a trip and see the evolution of its best day
+    to book (same heatmap as ``best-time-evolution --origin --destination``).
+
+    Trips are listed by number of available MAXJEUNE seats. The page is
+    ``templates/trip_explorer.html`` with the data embedded.
+    """
+    data = trip_explorer_data(n_trips)
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    page = Path("templates/trip_explorer.html").read_text().replace(
+        "__TRIP_DATA__", payload.replace("</", "<\\/")
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(page)
+    print(f"{len(data['trips'])} trips, page written to {output} ({len(page) / 1e6:.1f} MB)")
 
 
 @app.command()
