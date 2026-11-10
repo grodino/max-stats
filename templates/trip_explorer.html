@@ -135,8 +135,10 @@ input, select, button { font: inherit; color: var(--ink); }
 .member[aria-current="true"] { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); }
 .member-name { overflow-wrap: anywhere; }
 .member-meta { color: var(--muted); font-size: 0.8125rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.member-view { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; border-top: 1px dashed var(--line); padding-top: 1rem; scroll-margin-top: 1rem; }
-.member-view-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 0.5rem 1rem; }
+#group-view { scroll-margin-top: 1rem; }
+.group-view-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 0.5rem 1rem; }
+.view-actions { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+.member.centre .member-name { font-weight: 600; }
 @media (max-width: 760px) { .group-panel { grid-template-columns: minmax(0, 1fr); } }
 @media (min-width: 761px) { .members { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 1rem); } }
 
@@ -203,28 +205,23 @@ input, select, button { font: inherit; color: var(--ink); }
     </div>
     <div class="group-tabs" id="group-tabs" role="group" aria-label="Groupes"></div>
     <div class="group-panel">
-      <div class="chart-block" id="barycenter">
-        <div class="chart-head">
-          <h3 id="barycenter-title">—</h3>
-          <p class="chart-sub">Barycentre du groupe : part des places du mois apparues à chaque jour avant le départ, rapportée au jour le plus fourni du mois</p>
+      <div class="chart-block" id="group-view">
+        <div class="group-view-head">
+          <div class="chart-head">
+            <h3 id="view-title">—</h3>
+            <p class="chart-sub" id="view-sub"></p>
+          </div>
+          <div class="view-actions">
+            <button class="link-button" id="view-reset" type="button" hidden>Revenir au barycentre</button>
+            <button class="link-button" id="member-open" type="button" hidden>Choisir ce trajet</button>
+          </div>
         </div>
         <div class="group-facts" id="group-facts">
-          <div class="fact"><span class="fact-value" id="median-2025">—</span><span class="fact-label">Jour médian des places, départs 2025</span></div>
+          <div class="fact"><span class="fact-value" id="median-2025">—</span><span class="fact-label">Jour médian des places du groupe, départs 2025</span></div>
           <div class="fact"><span class="fact-value" id="median-2026">—</span><span class="fact-label">Depuis mars 2026</span></div>
         </div>
-        <div class="legend" data-legend="Jour le plus fourni"></div>
+        <div class="legend" id="group-legend" data-legend="Jour le plus fourni"></div>
         <div class="chart" id="group-chart"></div>
-        <div class="member-view" id="member-view">
-          <div class="member-view-head">
-            <div class="chart-head">
-              <h3 id="member-title">—</h3>
-              <p class="chart-sub" id="member-sub"></p>
-            </div>
-            <button class="link-button" id="member-open" type="button">Choisir ce trajet</button>
-          </div>
-          <div class="legend" data-legend="Meilleur jour"></div>
-          <div class="chart" id="member-chart"></div>
-        </div>
       </div>
       <div class="members" id="members">
         <div class="members-head"><span id="members-count">—</span><span>rang · écart</span></div>
@@ -316,7 +313,10 @@ input, select, button { font: inherit; color: var(--ink); }
       '<span class="legend-item"><span class="bg-nd"></span>Pas observé</span>' +
       '<span class="legend-item"><svg width="12" height="12" viewBox="-6 -6 12 12" aria-hidden="true"><circle class="best" r="4.5"></circle></svg></span>' +
       '<span class="legend-item"><svg width="12" height="12" viewBox="-6 -6 12 12" aria-hidden="true"><rect class="second" x="-5" y="-5" width="10" height="10"></rect></svg>Deuxième</span>');
-    legend.children[2].appendChild(document.createTextNode(legend.getAttribute("data-legend")));
+    var bestLabel = document.createElement("span");
+    bestLabel.className = "legend-best-label";
+    bestLabel.textContent = legend.getAttribute("data-legend");
+    legend.children[2].appendChild(bestLabel);
   });
 
   /* Heatmap of a (month x days before) matrix.
@@ -440,7 +440,6 @@ input, select, button { font: inherit; color: var(--ink); }
 
   var tripChart = new Heatmap($("trip-chart"), "Probabilité de trouver une place, par mois de départ et jour avant le départ");
   var groupChart = new Heatmap($("group-chart"), "Barycentre du groupe, par mois de départ et jour avant le départ");
-  var memberChart = new Heatmap($("member-chart"), "Probabilité de trouver une place pour le trajet choisi dans le groupe");
 
   // Heatmap of a trip: probability relative to the best day of each month
   function tripSpec(trip) {
@@ -504,49 +503,76 @@ input, select, button { font: inherit; color: var(--ink); }
   });
 
   var currentGroup = null;
+  var currentMember = null; // null: the group's barycenter is shown
+
   function showGroup(c) {
     currentGroup = c;
+    currentMember = null;
     var g = groups[c];
     Array.prototype.forEach.call(tabs.children, function (b, i) { b.setAttribute("aria-pressed", String(i === c)); });
-    $("barycenter-title").textContent = groupName(c) + " : barycentre de " + g.members.length + " trajets";
     $("median-2025").textContent = g.median2025 === null ? "—" : "J-" + dec1.format(g.median2025);
     $("median-2026").textContent = g.median2026 === null ? "—" : "J-" + dec1.format(g.median2026);
-    groupChart.draw({
-      values: g.matrix, ref: g.ref, markers: g.markers,
-      tip: function (mi, d) {
-        var v = g.matrix[mi][d];
-        return [
-          pct1.format(v) + " des places du mois apparaissent ce jour-là",
-          pct.format(v / g.ref[mi]) + " du jour le plus fourni (" + dayLabel(g.markers[mi].best) + ")"
-        ];
-      }
-    });
-    // Show the selected trip if it is in this group, else the most typical one
-    showMember(current && current.cluster === c ? current : g.members[0], false);
+    renderGroupView();
   }
 
-  var currentMember = null;
-  function showMember(trip, reveal) {
+  function showMember(trip) {
     currentMember = trip;
-    $("member-title").textContent = tripLabel(trip);
-    $("member-sub").textContent = "Écart au barycentre : " + dec1.format(trip.cluster_distance) + " jour" +
-      (trip.cluster_distance >= 2 ? "s" : "") + " · rang " + trip.rank + " · " + nf.format(trip.available) + " places observées";
-    var open = $("member-open");
-    open.hidden = trip === current;
-    memberChart.draw(tripSpec(trip));
-    renderMembers();
-    if (reveal) {
-      var box = $("member-view").getBoundingClientRect();
-      if (box.top < 0 || box.top > window.innerHeight - 120) {
-        $("member-view").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
-      }
-    }
+    renderGroupView();
+    var top = $("group-view").getBoundingClientRect().top;
+    if (top < 0) $("group-view").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
   }
 
+  function renderGroupView() {
+    var g = groups[currentGroup], t = currentMember;
+    $("view-reset").hidden = !t;
+    $("member-open").hidden = !t || t === current;
+    $("group-legend").querySelector(".legend-best-label").textContent = t ? "Meilleur jour" : "Jour le plus fourni";
+    if (t) {
+      $("view-title").textContent = tripLabel(t);
+      $("view-sub").textContent = "Probabilité de trouver une place, rapportée au meilleur jour du mois · écart au barycentre : " +
+        dec1.format(t.cluster_distance) + " jour" + (t.cluster_distance >= 2 ? "s" : "") + " · rang " + t.rank;
+      groupChart.draw(tripSpec(t));
+    } else {
+      $("view-title").textContent = groupName(currentGroup) + " : barycentre de " + g.members.length + " trajets";
+      $("view-sub").textContent = "Part des places du mois apparues à chaque jour avant le départ, rapportée au jour le plus fourni du mois. Choisissez un trajet dans la liste pour le comparer.";
+      groupChart.draw({
+        values: g.matrix, ref: g.ref, markers: g.markers,
+        tip: function (mi, d) {
+          var v = g.matrix[mi][d];
+          return [
+            pct1.format(v) + " des places du mois apparaissent ce jour-là",
+            pct.format(v / g.ref[mi]) + " du jour le plus fourni (" + dayLabel(g.markers[mi].best) + ")"
+          ];
+        }
+      });
+    }
+    renderMembers();
+  }
+
+  $("view-reset").addEventListener("click", function () { showMember(null); });
   $("member-open").addEventListener("click", function () {
     select(currentMember, true);
     $("picker").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
   });
+
+  function memberButton(name, meta, isCurrent, onClick, extraClass) {
+    var li = document.createElement("li");
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "member" + (extraClass ? " " + extraClass : "");
+    if (isCurrent) b.setAttribute("aria-current", "true");
+    var n = document.createElement("span");
+    n.className = "member-name";
+    n.textContent = name;
+    var m = document.createElement("span");
+    m.className = "member-meta";
+    m.textContent = meta;
+    b.appendChild(n);
+    b.appendChild(m);
+    b.addEventListener("click", onClick);
+    li.appendChild(b);
+    return li;
+  }
 
   function renderMembers() {
     if (currentGroup === null) return;
@@ -554,23 +580,12 @@ input, select, button { font: inherit; color: var(--ink); }
     $("members-count").textContent = g.members.length + " trajets, du plus typique au moins typique";
     var list = $("member-list");
     list.textContent = "";
+    list.appendChild(memberButton("Barycentre du groupe", "centre", currentMember === null,
+      function () { showMember(null); }, "centre"));
     g.members.forEach(function (t) {
-      var li = document.createElement("li");
-      var b = document.createElement("button");
-      b.type = "button";
-      b.className = "member";
-      if (t === currentMember) b.setAttribute("aria-current", "true");
-      var name = document.createElement("span");
-      name.className = "member-name";
-      name.textContent = tripLabel(t);
-      var meta = document.createElement("span");
-      meta.className = "member-meta";
-      meta.textContent = "#" + t.rank + " · " + dec1.format(t.cluster_distance) + " j";
-      b.appendChild(name);
-      b.appendChild(meta);
-      b.title = "Écart au barycentre : " + dec2.format(t.cluster_distance) + " jour (distance de Wasserstein moyenne)";
-      b.addEventListener("click", function () { showMember(t, true); });
-      li.appendChild(b);
+      var li = memberButton(tripLabel(t), "#" + t.rank + " \u00b7 " + dec1.format(t.cluster_distance) + " j",
+        t === currentMember, function () { showMember(t); });
+      li.firstChild.title = "Écart au barycentre : " + dec2.format(t.cluster_distance) + " jour (distance de Wasserstein moyenne)";
       list.appendChild(li);
     });
   }
