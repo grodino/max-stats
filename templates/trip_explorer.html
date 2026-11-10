@@ -135,7 +135,10 @@ input, select, button { font: inherit; color: var(--ink); }
 .member[aria-current="true"] { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); }
 .member-name { overflow-wrap: anywhere; }
 .member-meta { color: var(--muted); font-size: 0.8125rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.member-view { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; border-top: 1px dashed var(--line); padding-top: 1rem; scroll-margin-top: 1rem; }
+.member-view-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 0.5rem 1rem; }
 @media (max-width: 760px) { .group-panel { grid-template-columns: minmax(0, 1fr); } }
+@media (min-width: 761px) { .members { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 1rem); } }
 
 .method { display: grid; gap: 0.5rem; max-width: 42rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 1.25rem; }
 .method p { margin: 0; }
@@ -211,6 +214,17 @@ input, select, button { font: inherit; color: var(--ink); }
         </div>
         <div class="legend" data-legend="Jour le plus fourni"></div>
         <div class="chart" id="group-chart"></div>
+        <div class="member-view" id="member-view">
+          <div class="member-view-head">
+            <div class="chart-head">
+              <h3 id="member-title">—</h3>
+              <p class="chart-sub" id="member-sub"></p>
+            </div>
+            <button class="link-button" id="member-open" type="button">Choisir ce trajet</button>
+          </div>
+          <div class="legend" data-legend="Meilleur jour"></div>
+          <div class="chart" id="member-chart"></div>
+        </div>
       </div>
       <div class="members" id="members">
         <div class="members-head"><span id="members-count">—</span><span>rang · écart</span></div>
@@ -426,6 +440,25 @@ input, select, button { font: inherit; color: var(--ink); }
 
   var tripChart = new Heatmap($("trip-chart"), "Probabilité de trouver une place, par mois de départ et jour avant le départ");
   var groupChart = new Heatmap($("group-chart"), "Barycentre du groupe, par mois de départ et jour avant le départ");
+  var memberChart = new Heatmap($("member-chart"), "Probabilité de trouver une place pour le trajet choisi dans le groupe");
+
+  // Heatmap of a trip: probability relative to the best day of each month
+  function tripSpec(trip) {
+    var bestByMonth = {};
+    trip.best.forEach(function (b) { bestByMonth[b.month] = b; });
+    return {
+      values: trip.probability,
+      ref: months.map(function (_, mi) { return bestByMonth[mi] ? bestByMonth[mi].probability : null; }),
+      markers: trip.best,
+      tip: function (mi, d) {
+        var p = trip.probability[mi][d], b = bestByMonth[mi];
+        if (p === null) return ["Pas observé"];
+        return [pct1.format(p) + " des trains avaient une place",
+          b ? pct.format(p / b.probability) + " du meilleur jour (" + dayLabel(b.best) + ", " + pct1.format(b.probability) + ")"
+            : "Aucune place ce mois-ci"];
+      }
+    };
+  }
 
   // Groups: barycenter facts and markers
   var groups = CL.barycenters.map(function (matrix, c) {
@@ -488,8 +521,32 @@ input, select, button { font: inherit; color: var(--ink); }
         ];
       }
     });
-    renderMembers();
+    // Show the selected trip if it is in this group, else the most typical one
+    showMember(current && current.cluster === c ? current : g.members[0], false);
   }
+
+  var currentMember = null;
+  function showMember(trip, reveal) {
+    currentMember = trip;
+    $("member-title").textContent = tripLabel(trip);
+    $("member-sub").textContent = "Écart au barycentre : " + dec1.format(trip.cluster_distance) + " jour" +
+      (trip.cluster_distance >= 2 ? "s" : "") + " · rang " + trip.rank + " · " + nf.format(trip.available) + " places observées";
+    var open = $("member-open");
+    open.hidden = trip === current;
+    memberChart.draw(tripSpec(trip));
+    renderMembers();
+    if (reveal) {
+      var box = $("member-view").getBoundingClientRect();
+      if (box.top < 0 || box.top > window.innerHeight - 120) {
+        $("member-view").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+      }
+    }
+  }
+
+  $("member-open").addEventListener("click", function () {
+    select(currentMember, true);
+    $("picker").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+  });
 
   function renderMembers() {
     if (currentGroup === null) return;
@@ -502,7 +559,7 @@ input, select, button { font: inherit; color: var(--ink); }
       var b = document.createElement("button");
       b.type = "button";
       b.className = "member";
-      if (t === current) b.setAttribute("aria-current", "true");
+      if (t === currentMember) b.setAttribute("aria-current", "true");
       var name = document.createElement("span");
       name.className = "member-name";
       name.textContent = tripLabel(t);
@@ -512,10 +569,7 @@ input, select, button { font: inherit; color: var(--ink); }
       b.appendChild(name);
       b.appendChild(meta);
       b.title = "Écart au barycentre : " + dec2.format(t.cluster_distance) + " jour (distance de Wasserstein moyenne)";
-      b.addEventListener("click", function () {
-        select(t, true);
-        $("picker").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
-      });
+      b.addEventListener("click", function () { showMember(t, true); });
       li.appendChild(b);
       list.appendChild(li);
     });
@@ -609,20 +663,7 @@ input, select, button { font: inherit; color: var(--ink); }
     $("group-note").textContent = "Écart au barycentre : " + dec1.format(trip.cluster_distance) + " jour" +
       (trip.cluster_distance >= 2 ? "s" : "") + " · " + groups[trip.cluster].members.length + " trajets";
 
-    var bestByMonth = {};
-    trip.best.forEach(function (b) { bestByMonth[b.month] = b; });
-    tripChart.draw({
-      values: trip.probability,
-      ref: months.map(function (_, mi) { return bestByMonth[mi] ? bestByMonth[mi].probability : null; }),
-      markers: trip.best,
-      tip: function (mi, d) {
-        var p = trip.probability[mi][d], b = bestByMonth[mi];
-        if (p === null) return ["Pas observé"];
-        return [pct1.format(p) + " des trains avaient une place",
-          b ? pct.format(p / b.probability) + " du meilleur jour (" + dayLabel(b.best) + ", " + pct1.format(b.probability) + ")"
-            : "Aucune place ce mois-ci"];
-      }
-    });
+    tripChart.draw(tripSpec(trip));
   }
 
   // Start on the remembered trip, or the trip with the most seats
