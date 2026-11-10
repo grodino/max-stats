@@ -26,6 +26,14 @@ TRAIN = [
 IATA_MATCH = {"FRPAZ": "FRESB", "FRPNO": "FRCCP"}
 HAS_SEAT = pl.col("od_happy_card") == "OUI"
 REQUEST_DAY = pl.col("request_date").dt.date()
+# Day (Europe/Paris) a snapshot describes. Snapshots are taken at night
+# (around 23h-3h Paris time) and shifted by 2h so that a 23h snapshot counts
+# for the next day: ``date - BOOKING_DAY`` is the number of days before
+# departure at the start of that day.
+BOOKING_DAY = (
+    pl.col("request_date").dt.replace_time_zone("UTC").dt.convert_time_zone("Europe/Paris")
+    + pl.duration(hours=2)
+).dt.date()
 # Departure and arrival times are "HH:MM" strings in the raw CSV files
 PARSE_TIMES = pl.col("heure_depart", "heure_arrivee").str.to_time("%H:%M")
 
@@ -500,12 +508,7 @@ def booking_lead_time_table(
             pl.col("date").is_between(first_request + timedelta(days=31), last_request)
         ).then(pl.lit("Historique complet"))
 
-    booking_day = (
-        pl.col("request_date")
-        .dt.replace_time_zone("UTC")
-        .dt.convert_time_zone("Europe/Paris")
-        + pl.duration(hours=2)
-    ).dt.date()
+    booking_day = BOOKING_DAY
     keys = ["period", "days_before"]
     if condition is not None:
         keys.append("condition")
@@ -552,52 +555,170 @@ def booking_lead_time_table(
     return counts.with_columns(probability=pl.col("available") / pl.col("total")).sort(keys)
 
 
+# Big stations, as hubs: hub name -> station names in the data
+HUBS = {
+    "Paris": ["PARIS (intramuros)", "PARIS MONTPARNASSE VAUGIRARD"],
+    "Lyon": ["LYON (intramuros)", "LYON ST EXUPERY TGV."],
+    "Marseille": ["MARSEILLE ST CHARLES", "MARSEILLE BLANCARDE"],
+    "Lille": ["LILLE (intramuros)"],
+    "Bordeaux": ["BORDEAUX ST JEAN"],
+    "Rennes": ["RENNES"],
+    "Nantes": ["NANTES"],
+    "Toulouse": ["TOULOUSE MATABIAU"],
+    "Strasbourg": ["STRASBOURG"],
+    "Montpellier": ["MONTPELLIER SAINT ROCH", "MONTPELLIER SUD DE FRANCE"],
+}
+PERIODS = {"2026": "Départs depuis mars 2026", "2025": "Départs en 2025"}
+
+
+def hub_of(name: str) -> pl.Expr:
+    """Hub of the ``name`` station column (``"origine"`` or ``"destination"``),
+    null for other stations."""
+    stations = {station.upper(): hub for hub, names in HUBS.items() for station in names}
+    return pl.col(name).str.to_uppercase().replace_strict(stations, default=None)
+
+
+def hub_lead_time_table(period: str) -> pl.DataFrame:
+    """Number of trips with a MAXJEUNE seat by hub, direction and days before
+    departure: mean and standard deviation over the departure dates.
+
+    A trip is a train leg (``TRAIN``) whose origin (direction "Départs") or
+    destination ("Arrivées") is a station of the hub; legs within one hub
+    (e.g. Lyon Part-Dieu -> Perrache) are left out. For each departure date
+    and number of days before departure, the amount is the number of such
+    legs that had a seat in that day's snapshot. Days with two snapshots
+    are averaged, days without snapshot are left out, and so are departures
+    after the last snapshot (whose 30-day window is not complete).
+    """
+    origin, destination = hub_of("origine"), hub_of("destination")
+    table = (
+        booking_lead_time_table(
+            condition=pl.struct(
+                origin_hub=origin, destination_hub=destination, date=pl.col("date")
+            ),
+            where=(origin.is_not_null() | destination.is_not_null())
+            & origin.ne_missing(destination),
+        )
+        .filter(pl.col("period") == PERIODS[period])
+        .unnest("condition")
+    )
+    # Number of snapshots of each booking day (one row of each file is enough)
+    snapshots = (
+        pl.concat(
+            pl.scan_parquet(file).select(booking_day=BOOKING_DAY).head(1).collect()
+            for file in sorted(MAXJEUNE_FOLDER.glob("*.parquet"))
+        )
+        .group_by("booking_day")
+        .agg(snapshots=pl.len())
+    )
+
+    by_date = (
+        pl.concat(
+            [
+                table.filter(pl.col(column).is_not_null()).select(
+                    hub=column, direction=pl.lit(direction), *["date", "days_before", "available"]
+                )
+                for column, direction in (("origin_hub", "Départs"), ("destination_hub", "Arrivées"))
+            ]
+        )
+        .group_by("hub", "direction", "date", "days_before")
+        .agg(pl.col("available").sum())
+        .with_columns(booking_day=pl.col("date") - pl.duration(days=pl.col("days_before")))
+        .join(snapshots, on="booking_day")
+        .filter(pl.col("date") <= snapshots["booking_day"].max())
+        .with_columns(amount=pl.col("available") / pl.col("snapshots"))
+    )
+    return (
+        by_date.group_by("hub", "direction", "days_before")
+        .agg(
+            mean=pl.col("amount").mean(),
+            std=pl.col("amount").std(),
+            departure_dates=pl.len(),
+        )
+        .with_columns(
+            lower=(pl.col("mean") - pl.col("std")).clip(lower_bound=0),
+            upper=pl.col("mean") + pl.col("std"),
+        )
+        .sort("hub", "direction", "days_before")
+    )
+
+
 @app.command()
-def booking_lead_time():
-    """Estimate the best time to book: probability that a MAXJEUNE seat is
-    available as a function of the number of days before departure."""
+def booking_lead_time(
+    period: str = typer.Option(
+        "2026", help="Departures since March 2026 ('2026') or in 2025 ('2025')."
+    ),
+):
+    """Number of trips with a MAXJEUNE seat as a function of the number of
+    days before departure, for trips leaving and arriving at each hub
+    (``HUBS``): mean over the departure dates, with a band of one standard
+    deviation (see ``hub_lead_time_table``).
 
-    table = booking_lead_time_table()
-    table.write_csv(generated_file("booking_lead_time.csv"))
+    Writes ``assets/booking_lead_time.svg`` and
+    ``data/generated/booking_lead_time_hubs.csv``.
+    """
+    if period not in PERIODS:
+        raise typer.BadParameter(f"--period must be one of {', '.join(PERIODS)}")
+    table = hub_lead_time_table(period)
+    table.write_csv(generated_file("booking_lead_time_hubs.csv"))
 
-    with pl.Config(tbl_rows=100):
-        print(table.pivot(on="period", index="days_before", values="probability"))
-
-    for best in best_booking_time(table).iter_rows(named=True):
+    best = (
+        table.sort("mean", "days_before", descending=True)
+        .group_by("hub", "direction", maintain_order=True)
+        .first()
+        .sort("hub", "direction")
+    )
+    for row in best.iter_rows(named=True):
         print(
-            f"{best['period']}: best time = {best['best_days_before']} days before "
-            f"departure ({best['best_probability']:.1%} of trains have a MAXJEUNE seat)"
+            f"{row['hub']:<12} {row['direction']:<9} best time = {row['days_before']:>2} days "
+            f"before departure ({row['mean']:.1f} ± {row['std']:.1f} trips with a seat, "
+            f"{row['departure_dates']} departure dates)"
         )
 
+    labels = {"Départs": "Départs de la ville", "Arrivées": "Arrivées dans la ville"}
+    data = table.with_columns(direction=pl.col("direction").replace_strict(labels))
+    color = alt.Color(
+        "direction:N",
+        title=None,
+        scale=alt.Scale(domain=list(labels.values()), range=[THEME["main"], THEME["accent"]]),
+    )
+    x = alt.X(
+        "days_before:Q",
+        title="Jours avant le départ",
+        scale=alt.Scale(reverse=True, domain=[30, 0]),
+    )
+    band = alt.Chart().mark_area(opacity=0.2).encode(
+        x=x, y=alt.Y("lower:Q"), y2="upper:Q", color=color
+    )
+    line = alt.Chart().mark_line(strokeWidth=2).encode(
+        x=x,
+        y=alt.Y("mean:Q", title="Trajets avec une place"),
+        color=color,
+        tooltip=[
+            alt.Tooltip("direction:N", title="Sens"),
+            alt.Tooltip("days_before:Q", title="Jours avant"),
+            alt.Tooltip("mean:Q", title="Moyenne", format=".1f"),
+            alt.Tooltip("std:Q", title="Écart-type", format=".1f"),
+        ],
+    )
     plot = (
-        alt.Chart(
-            table,
-            width=400,
-            height=200,
-            title="Probabilité qu'une place MAXJEUNE soit disponible",
+        alt.layer(band, line, data=data)
+        .properties(width=280, height=140)
+        .facet(
+            facet=alt.Facet("hub:N", title=None, sort=list(HUBS), header=alt.Header(labelFontSize=12)),
+            columns=2,
         )
-        .mark_line(point=alt.OverlayMarkDef(size=20), strokeWidth=2)
-        .encode(
-            x=alt.X(
-                "days_before",
-                title="Jours avant le départ",
-                scale=alt.Scale(reverse=True, domain=[30, 0]),
-            ),
-            y=alt.Y(
-                "probability",
-                title="Trains avec une place disponible",
-                axis=alt.Axis(format="%"),
-            ),
-            color=alt.Color(
-                "period",
-                scale=alt.Scale(
-                    domain=["Départs depuis mars 2026", "Départs en 2025"],
-                    range=[THEME["main"], THEME["context"]],
-                ),
-            ).legend(title=None),
+        .resolve_scale(y="independent")
+        .properties(
+            title=alt.Title(
+                "Trajets avec une place MAXJEUNE selon le jour de réservation",
+                subtitle=f"{PERIODS[period]} · moyenne par jour de départ, "
+                "zone : ± un écart-type · échelles différentes par ville",
+            )
         )
     )
     plot.save("assets/booking_lead_time.svg")
+    print("Figure saved to assets/booking_lead_time.svg")
 
 
 def best_booking_time(table: pl.DataFrame, min_observations: int = 0) -> pl.DataFrame:
