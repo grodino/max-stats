@@ -149,19 +149,19 @@ input, select, button { font: inherit; color: var(--ink); }
 .segmented button { background: none; border: 0; border-radius: 999px; padding: 0.35rem 0.9rem; cursor: pointer; color: var(--muted); }
 .segmented button[aria-pressed="true"] { background: var(--bg); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
 .hub-view { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }
-.fact-value.week { color: var(--r4); }
-.fact-value.weekend { color: var(--accent); }
+.fact-value.normal { color: var(--r4); }
+.fact-value.peak { color: var(--accent); }
 .swatch-line { width: 1.2rem; height: 3px; border-radius: 2px; display: inline-block; }
-.swatch-line.week { background: var(--r4); }
-.swatch-line.weekend { background: var(--accent); }
+.swatch-line.normal { background: var(--r4); }
+.swatch-line.peak { background: var(--accent); }
 .swatch-band { width: 1.2rem; height: 0.7rem; display: inline-block; background: var(--muted); opacity: 0.25; }
 .grid-line { stroke: var(--line); stroke-width: 1; }
 .series-band { stroke: none; opacity: 0.18; }
 .series-line { fill: none; stroke-width: 2; stroke-linejoin: round; }
-.series-band.week { fill: var(--r4); } .series-band.weekend { fill: var(--accent); }
-.series-line.week { stroke: var(--r4); } .series-line.weekend { stroke: var(--accent); }
+.series-band.normal { fill: var(--r4); } .series-band.peak { fill: var(--accent); }
+.series-line.normal { stroke: var(--r4); } .series-line.peak { stroke: var(--accent); }
 .series-dot { stroke: var(--bg); stroke-width: 1.5; }
-.series-dot.week { fill: var(--r4); } .series-dot.weekend { fill: var(--accent); }
+.series-dot.normal { fill: var(--r4); } .series-dot.peak { fill: var(--accent); }
 .rule { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
 
 .method { display: grid; gap: 0.5rem; max-width: 42rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 1.25rem; }
@@ -236,12 +236,12 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     <div class="hub-view" id="hub-view">
       <h3 id="hub-title">—</h3>
       <div class="group-facts" id="hub-facts">
-        <div class="fact"><span class="fact-value week" id="hub-week">—</span><span class="fact-label">Meilleur jour, départs en semaine</span></div>
-        <div class="fact"><span class="fact-value weekend" id="hub-weekend">—</span><span class="fact-label">Meilleur jour, départs le week-end</span></div>
+        <div class="fact"><span class="fact-value normal" id="hub-normal">—</span><span class="fact-label">Meilleur jour, hors forte affluence</span></div>
+        <div class="fact"><span class="fact-value peak" id="hub-peak">—</span><span class="fact-label">Meilleur jour, forte affluence</span></div>
       </div>
       <div class="legend">
-        <span class="legend-item"><span class="swatch-line week"></span>Semaine (lundi-vendredi)</span>
-        <span class="legend-item"><span class="swatch-line weekend"></span>Week-end (samedi-dimanche)</span>
+        <span class="legend-item"><span class="swatch-line normal"></span>Hors forte affluence</span>
+        <span class="legend-item"><span class="swatch-line peak"></span>Forte affluence</span>
         <span class="legend-item"><span class="swatch-band"></span>± un écart-type</span>
       </div>
       <div class="chart" id="hub-chart"></div>
@@ -734,7 +734,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     tripChart.draw(tripSpec(trip));
   }
 
-  /* Hubs: trips with a seat by days before departure, weekday vs weekend.
+  /* Hubs: trips with a seat by days before departure, off-peak vs MAXJEUNE peak periods.
      spec = { series: [{cls, label, mean, lower, upper, std}] }, arrays indexed by days before (0-30) */
   var HUBS = DATA.hubs;
   var nf0 = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 });
@@ -890,18 +890,19 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
       b.setAttribute("aria-pressed", String(b.getAttribute("data-direction") === currentDirection));
     });
     var data = HUBS.series[currentHub][currentDirection];
-    var week = data["Semaine"], weekend = data["Week-end"];
+    var normal = data["Hors forte affluence"], peak = data["Forte affluence"];
     $("hub-title").textContent = (currentDirection === "Départs" ? "Départs de " : "Arrivées à ") + currentHub;
-    [["hub-week", week], ["hub-weekend", weekend]].forEach(function (pair) {
+    [["hub-normal", normal], ["hub-peak", peak]].forEach(function (pair) {
       var d = bestDay(pair[1]);
-      $(pair[0]).textContent = d === null ? "—" : dayLabel(d) + " · " + nf0.format(pair[1].mean[d]) + " trajets";
+      $(pair[0]).textContent = d === null ? "—" : dayLabel(d) + " \u00b7 " + nf0.format(pair[1].mean[d]) + " trajets";
     });
-    $("hubs-sub").textContent = "Nombre moyen de trajets avec une place MAXJEUNE selon le jour de réservation, " +
-      HUBS.period.toLowerCase() + " (" + week.departure_dates + " jours de départ en semaine, " + weekend.departure_dates +
-      " le week-end). Un trajet est un tronçon de train : un Paris → Lyon → Marseille compte pour plusieurs trajets au départ de Paris.";
+    $("hubs-sub").textContent = "Nombre moyen de trajets avec une place MAXJEUNE par jour de départ, selon le jour de réservation, " +
+      HUBS.period.toLowerCase() + ". Forte affluence, d'après les conditions MAXJEUNE : trains partant le vendredi et le dimanche à partir de " +
+      HUBS.peak_from + ", et les veilles et derniers jours des ponts et jours fériés (" + peak.departure_dates + " jours de départ ; " +
+      normal.departure_dates + " pour le reste). Un trajet est un tronçon de train : un Paris \u2192 Lyon \u2192 Marseille compte pour plusieurs trajets au départ de Paris.";
     hubChart.draw({ series: [
-      { cls: "week", label: "Semaine", mean: week.mean, lower: week.lower, upper: week.upper, std: week.std },
-      { cls: "weekend", label: "Week-end", mean: weekend.mean, lower: weekend.lower, upper: weekend.upper, std: weekend.std }
+      { cls: "normal", label: "Hors forte affluence", mean: normal.mean, lower: normal.lower, upper: normal.upper, std: normal.std },
+      { cls: "peak", label: "Forte affluence", mean: peak.mean, lower: peak.lower, upper: peak.upper, std: peak.std }
     ] });
   }
   renderHub();

@@ -3,7 +3,7 @@ import json
 import re
 from urllib.request import urlopen
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import typer
 import polars as pl
@@ -569,12 +569,75 @@ HUBS = {
     "Montpellier": ["MONTPELLIER SAINT ROCH", "MONTPELLIER SUD DE FRANCE"],
 }
 PERIODS = {"2026": "Départs depuis mars 2026", "2025": "Départs en 2025"}
-# Day of departure: Monday-Friday or Saturday-Sunday
-DAY_TYPE = (
-    pl.when(pl.col("date").dt.weekday() >= 6)
-    .then(pl.lit("Week-end"))
-    .otherwise(pl.lit("Semaine"))
-)
+# MAXJEUNE "périodes de forte affluence", when fewer seats are opened to the
+# subscription (CGV): Friday and Sunday afternoons and evenings, the eves of
+# big holiday departures and long weekends ("ponts"). SNCF gives no hour:
+# afternoon is taken as departures from PEAK_FROM.
+PEAK_FROM = time(12, 0)
+AFFLUENCE = ["Hors forte affluence", "Forte affluence"]
+
+
+def easter(year: int) -> date:
+    """Easter Sunday (anonymous Gregorian algorithm)."""
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = b // 4, b % 4
+    g = (8 * b + 13) // 25
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 19 * l) // 433
+    month = (h + l - 7 * m + 90) // 25
+    return date(year, month, (h + l - 7 * m + 33 * month + 19) % 32)
+
+
+def public_holidays(year: int) -> list[date]:
+    """French public holidays (metropolitan France)."""
+    sunday = easter(year)
+    return [
+        date(year, 1, 1),
+        sunday + timedelta(days=1),  # lundi de Pâques
+        date(year, 5, 1),
+        date(year, 5, 8),
+        sunday + timedelta(days=39),  # Ascension
+        sunday + timedelta(days=50),  # lundi de Pentecôte
+        date(year, 7, 14),
+        date(year, 8, 15),
+        date(year, 11, 1),
+        date(year, 11, 11),
+        date(year, 12, 25),
+    ]
+
+
+def holiday_peak_days(years: range = range(2024, 2028)) -> list[date]:
+    """Days, other than Fridays and Sundays, whose afternoon is a peak
+    period: the eve and the last day of each public holiday, extended to the
+    adjacent weekend and to the bridge day ("pont": the Friday after a
+    Thursday holiday, the Monday before a Tuesday holiday)."""
+    days = set()
+    for holiday in (h for year in years for h in public_holidays(year)):
+        first = last = holiday
+        if holiday.isoweekday() == 4:  # Thursday: pont on Friday
+            last = holiday + timedelta(days=1)
+        if holiday.isoweekday() == 2:  # Tuesday: pont on Monday
+            first = holiday - timedelta(days=1)
+        while (first - timedelta(days=1)).isoweekday() >= 6:  # weekend before
+            first -= timedelta(days=1)
+        while (last + timedelta(days=1)).isoweekday() >= 6:  # weekend after
+            last += timedelta(days=1)
+        days |= {first - timedelta(days=1), last}
+    return sorted(d for d in days if d.isoweekday() not in (5, 7))
+
+
+def affluence() -> pl.Expr:
+    """``AFFLUENCE`` label of a train leg, from its departure date and time."""
+    peak_day = pl.col("date").dt.weekday().is_in([5, 7]) | pl.col("date").is_in(
+        holiday_peak_days()
+    )
+    return (
+        pl.when(peak_day & (pl.col("heure_depart") >= PEAK_FROM))
+        .then(pl.lit(AFFLUENCE[1]))
+        .otherwise(pl.lit(AFFLUENCE[0]))
+    )
 
 
 def hub_of(name: str) -> pl.Expr:
@@ -585,9 +648,10 @@ def hub_of(name: str) -> pl.Expr:
 
 
 def hub_lead_time_table(period: str) -> pl.DataFrame:
-    """Number of trips with a MAXJEUNE seat by hub, direction, day of
-    departure (``DAY_TYPE``: weekday or weekend) and days before departure:
-    mean and standard deviation over the departure dates.
+    """Number of trips with a MAXJEUNE seat by hub, direction, MAXJEUNE
+    period (``affluence``: peak or off-peak, from the departure date and
+    time) and days before departure: mean and standard deviation over the
+    departure dates.
 
     A trip is a train leg (``TRAIN``) whose origin (direction "Départs") or
     destination ("Arrivées") is a station of the hub; legs within one hub
@@ -595,13 +659,19 @@ def hub_lead_time_table(period: str) -> pl.DataFrame:
     and number of days before departure, the amount is the number of such
     legs that had a seat in that day's snapshot. Days with two snapshots
     are averaged, days without snapshot are left out, and so are departures
-    after the last snapshot (whose 30-day window is not complete).
+    after the last snapshot (whose 30-day window is not complete). A date
+    counts for a period only if it has trains in that period: peak means
+    are over Fridays, Sundays and holiday eves, and only count the trains
+    leaving from ``PEAK_FROM``.
     """
     origin, destination = hub_of("origine"), hub_of("destination")
     table = (
         booking_lead_time_table(
             condition=pl.struct(
-                origin_hub=origin, destination_hub=destination, date=pl.col("date")
+                origin_hub=origin,
+                destination_hub=destination,
+                date=pl.col("date"),
+                affluence_type=affluence(),
             ),
             where=(origin.is_not_null() | destination.is_not_null())
             & origin.ne_missing(destination),
@@ -623,12 +693,14 @@ def hub_lead_time_table(period: str) -> pl.DataFrame:
         pl.concat(
             [
                 table.filter(pl.col(column).is_not_null()).select(
-                    hub=column, direction=pl.lit(direction), *["date", "days_before", "available"]
+                    hub=column,
+                    direction=pl.lit(direction),
+                    *["affluence_type", "date", "days_before", "available"],
                 )
                 for column, direction in (("origin_hub", "Départs"), ("destination_hub", "Arrivées"))
             ]
         )
-        .group_by("hub", "direction", "date", "days_before")
+        .group_by("hub", "direction", "affluence_type", "date", "days_before")
         .agg(pl.col("available").sum())
         .with_columns(booking_day=pl.col("date") - pl.duration(days=pl.col("days_before")))
         .join(snapshots, on="booking_day")
@@ -636,8 +708,7 @@ def hub_lead_time_table(period: str) -> pl.DataFrame:
         .with_columns(amount=pl.col("available") / pl.col("snapshots"))
     )
     return (
-        by_date.with_columns(day_type=DAY_TYPE)
-        .group_by("hub", "direction", "day_type", "days_before")
+        by_date.group_by("hub", "direction", "affluence_type", "days_before")
         .agg(
             mean=pl.col("amount").mean(),
             std=pl.col("amount").std(),
@@ -647,18 +718,18 @@ def hub_lead_time_table(period: str) -> pl.DataFrame:
             lower=(pl.col("mean") - pl.col("std")).clip(lower_bound=0),
             upper=pl.col("mean") + pl.col("std"),
         )
-        .sort("hub", "direction", "day_type", "days_before")
+        .sort("hub", "direction", "affluence_type", "days_before")
     )
 
 
 def hub_explorer_data(period: str = "2026") -> dict:
     """``hub_lead_time_table`` as nested lists for the trip explorer page:
-    series[hub][direction][day_type] = {mean, lower, upper, std} indexed by
+    series[hub][direction][affluence_type] = {mean, lower, upper, std} indexed by
     days before departure (0-30), plus the number of departure dates."""
     table = hub_lead_time_table(period)
     series: dict = {}
-    for (hub, direction, day_type), group in table.group_by(
-        "hub", "direction", "day_type"
+    for (hub, direction, affluence_type), group in table.group_by(
+        "hub", "direction", "affluence_type"
     ):
         by_day = {row["days_before"]: row for row in group.iter_rows(named=True)}
 
@@ -668,14 +739,19 @@ def hub_explorer_data(period: str = "2026") -> dict:
                 for d in range(31)
             ]
 
-        series.setdefault(hub, {}).setdefault(direction, {})[day_type] = {
+        series.setdefault(hub, {}).setdefault(direction, {})[affluence_type] = {
             "mean": values("mean"),
             "std": values("std"),
             "lower": values("lower"),
             "upper": values("upper"),
             "departure_dates": group["departure_dates"].max(),
         }
-    return {"period": PERIODS[period], "hubs": [h for h in HUBS if h in series], "series": series}
+    return {
+        "period": PERIODS[period],
+        "peak_from": f"{PEAK_FROM:%H}h",
+        "hubs": [h for h in HUBS if h in series],
+        "series": series,
+    }
 
 
 @app.command()
@@ -699,13 +775,13 @@ def booking_lead_time(
 
     best = (
         table.sort("mean", "days_before", descending=True)
-        .group_by("hub", "direction", "day_type", maintain_order=True)
+        .group_by("hub", "direction", "affluence_type", maintain_order=True)
         .first()
-        .sort("hub", "direction", "day_type")
+        .sort("hub", "direction", "affluence_type")
     )
     for row in best.iter_rows(named=True):
         print(
-            f"{row['hub']:<12} {row['direction']:<9} {row['day_type']:<9} "
+            f"{row['hub']:<12} {row['direction']:<9} {row['affluence_type']:<20} "
             f"best time = {row['days_before']:>2} days "
             f"before departure ({row['mean']:.1f} ± {row['std']:.1f} trips with a seat, "
             f"{row['departure_dates']} departure dates)"
@@ -714,9 +790,9 @@ def booking_lead_time(
     labels = {"Départs": "Départs de la ville", "Arrivées": "Arrivées dans la ville"}
     data = table.with_columns(direction=pl.col("direction").replace_strict(labels))
     color = alt.Color(
-        "day_type:N",
-        title="Jour de départ",
-        scale=alt.Scale(domain=["Semaine", "Week-end"], range=[THEME["main"], THEME["accent"]]),
+        "affluence_type:N",
+        title="Période MAXJEUNE",
+        scale=alt.Scale(domain=AFFLUENCE, range=[THEME["main"], THEME["accent"]]),
     )
     x = alt.X(
         "days_before:Q",
@@ -731,7 +807,7 @@ def booking_lead_time(
         y=alt.Y("mean:Q", title="Trajets avec une place"),
         color=color,
         tooltip=[
-            alt.Tooltip("day_type:N", title="Jour de départ"),
+            alt.Tooltip("affluence_type:N", title="Période"),
             alt.Tooltip("days_before:Q", title="Jours avant"),
             alt.Tooltip("mean:Q", title="Moyenne", format=".1f"),
             alt.Tooltip("std:Q", title="Écart-type", format=".1f"),
@@ -750,7 +826,8 @@ def booking_lead_time(
         .properties(
             title=alt.Title(
                 "Trajets avec une place MAXJEUNE selon le jour de réservation",
-                subtitle=f"{PERIODS[period]} · semaine : lundi-vendredi, week-end : samedi-dimanche · "
+                subtitle=f"{PERIODS[period]} · forte affluence : vendredi et dimanche à partir de "
+                f"{PEAK_FROM:%H}h, veilles et fins de ponts et jours fériés · "
                 "moyenne par jour de départ, zone : ± un écart-type · échelles différentes par ville",
             )
         )
