@@ -1653,7 +1653,9 @@ SERVICES_FROM = date(2026, 3, 1)  # departures under the current quota releases
 # columns (the snapshot taken 30 days before rarely lists the date yet)
 DISTANCE_DAYS = 30
 # Hyperparameters chosen with cluster-trains --choose on the November 2026 data
-TRAIN_CURVE_TYPES = 24
+# (most stable pair with at least 3 groups; 16, 24 and 32 curve types are
+# within 0.003 of each other, 4 groups is the clear peak)
+TRAIN_CURVE_TYPES = 32
 TRAIN_GROUPS = 4
 
 
