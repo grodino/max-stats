@@ -1320,6 +1320,11 @@ def trip_explorer(
         trip["cluster"] = label
         trip["cluster_distance"] = distance
     data["hubs"] = hub_explorer_data("2026")
+    trains = train_cluster_input()
+    data["trains"] = train_cluster_page_data(
+        trains, fit_train_clusters(trains, TRAIN_CURVE_TYPES, TRAIN_GROUPS, seed)
+    )
+    del trains
     data["clusters"] = {
         "k": k,
         "silhouette": clusters["silhouette"],
@@ -1639,6 +1644,344 @@ def cluster_trips(
     )
     plot.save(generated_file("trip_clusters.svg"))
     print(f"\nClusters written to {generated_file('trip_clusters.csv')} and trip_clusters.svg")
+
+
+# Train services: one (origin, destination, departure time) seen over many dates
+SERVICE = ["origine", "destination", "heure_depart"]
+SERVICES_FROM = date(2026, 3, 1)  # departures under the current quota releases
+# Days before departure used in the distance: the J-30 row is missing for most
+# columns (the snapshot taken 30 days before rarely lists the date yet)
+DISTANCE_DAYS = 30
+# Hyperparameters chosen with cluster-trains --choose on the November 2026 data
+TRAIN_CURVE_TYPES = 24
+TRAIN_GROUPS = 4
+
+
+def service_matrices(first: date = SERVICES_FROM):
+    """Seat matrix of every train service departing from ``first``.
+
+    A service is an (origin, destination, departure time) triple. Its matrix
+    M has one row per number of days before departure (0-30) and one column
+    per departure date; a cell is 1 if the service had a MAXJEUNE seat in
+    that day's snapshot, 0 if not, and -1 if it was not listed (not running
+    that date, or no snapshot). Rows of the same service and date (coupled
+    trains with different numbers, several carriages) are merged: there is a
+    seat if any of them has one. Buses, international trains and OUIGO are
+    left out, as in ``booking_lead_time_table``, and so are legs between two
+    stations of the same city.
+
+    Returns the services (with their ``id``, the index in the array), the
+    array of all matrices, shaped (service, date, days before), and the
+    dates. Files are read one at a time and written into the array, which
+    is about 200 MB for 45 000 services and 255 dates.
+    """
+    import numpy as np
+
+    files = [
+        (file, pl.scan_parquet(file).select(BOOKING_DAY).head(1).collect().item())
+        for file in sorted(MAXJEUNE_FOLDER.glob("*.parquet"))
+    ]
+    last = max(day for _, day in files)
+    dates = pl.date_range(first, last, eager=True).to_list()
+    services = pl.DataFrame(
+        schema={"origine": pl.String, "destination": pl.String, "heure_depart": pl.Time, "id": pl.Int32}
+    )
+    matrices = np.full((30_000, len(dates), 31), -1, dtype=np.int8)
+    for file, booking_day in files:
+        if booking_day < first - timedelta(days=30):
+            continue
+        cells = (
+            pl.scan_parquet(file)
+            .filter(
+                *trip_filters(name="origine"),
+                *trip_filters(name="destination"),
+                ~pl.col("axe").str.starts_with("OUIGO"),
+                pl.col("date").is_between(first, last),
+                # legs within one city (Lyon Part-Dieu -> Perrache) are not trips
+                pl.col("origine") != pl.col("destination"),
+            )
+            .with_columns(days_before=(pl.col("date") - BOOKING_DAY).dt.total_days())
+            .filter(pl.col("days_before").is_between(0, 30))
+            .group_by(*SERVICE, "date", "days_before")
+            .agg(seat=HAS_SEAT.any())
+            .collect()
+        )
+        new = cells.select(SERVICE).unique().join(services, on=SERVICE, how="anti")
+        if new.height:
+            start = services.height
+            services = pl.concat(
+                [services, new.with_columns(id=pl.int_range(start, start + new.height, dtype=pl.Int32))]
+            )
+            if services.height > len(matrices):
+                grow = np.full((10_000, len(dates), 31), -1, dtype=np.int8)
+                matrices = np.concatenate([matrices, grow])
+        cells = cells.join(services, on=SERVICE)
+        i = cells["id"].to_numpy()
+        j = (cells["date"].to_numpy() - np.datetime64(first)).astype("timedelta64[D]").astype(int)
+        k = cells["days_before"].to_numpy()
+        # A day with two snapshots keeps the seat if either had one
+        matrices[i, j, k] = np.maximum(matrices[i, j, k], cells["seat"].cast(pl.Int8).to_numpy())
+    return services, matrices[: services.height], dates
+
+
+def train_cluster_input(min_dates: int = 100) -> dict:
+    """Services proposed on at least ``min_dates`` departure dates, with
+    their matrices and their columns (one booking curve per departure date,
+    J-0..J-29) for the distance.
+
+    The few missing cells of a listed column (about 1%: days without
+    snapshot) take the value of the nearest observed day of that column.
+    """
+    import numpy as np
+
+    services, matrices, dates = service_matrices()
+    observed = (matrices >= 0).any(axis=2)  # (service, date): proposed that date
+    keep = observed.sum(axis=1) >= min_dates
+    services = services.filter(pl.Series(keep)).with_row_index("row")
+    matrices, observed = matrices[keep], observed[keep]
+
+    curves = matrices[:, :, :DISTANCE_DAYS].astype(np.float32)
+    curves[curves < 0] = np.nan
+    for d in range(1, DISTANCE_DAYS):
+        curves[:, :, d] = np.where(np.isnan(curves[:, :, d]), curves[:, :, d - 1], curves[:, :, d])
+    for d in range(DISTANCE_DAYS - 2, -1, -1):
+        curves[:, :, d] = np.where(np.isnan(curves[:, :, d]), curves[:, :, d + 1], curves[:, :, d])
+    owner, column = np.nonzero(observed)
+    return {
+        "services": services,
+        "matrices": matrices,
+        "observed": observed,
+        "dates": dates,
+        "curves": np.nan_to_num(curves[owner, column]),  # (column, day)
+        "owner": owner,  # service row of each column
+        "min_dates": min_dates,
+    }
+
+
+def curve_histograms(owner, curve_type, n_services: int, n_types: int):
+    """Square root of each service's share of columns of each curve type:
+    Euclidean distances between these embeddings are sqrt(2) times the
+    Hellinger distance between the shares."""
+    import numpy as np
+
+    counts = np.zeros((n_services, n_types))
+    np.add.at(counts, (owner, curve_type), 1)
+    return np.sqrt(counts / counts.sum(axis=1, keepdims=True))
+
+
+def fit_curve_types(curves, n_types: int, seed: int = 0):
+    """Typical booking curves: k-means of all the columns (binary curves over
+    J-0..J-29); a centroid is the probability of a seat at each day."""
+    from sklearn.cluster import MiniBatchKMeans
+
+    return MiniBatchKMeans(n_clusters=n_types, n_init=3, random_state=seed, batch_size=8192).fit(curves)
+
+
+def choose_train_clusters(
+    data: dict,
+    curve_types: tuple = (8, 16, 24, 32),
+    groups: range = range(2, 13),
+    n_boot: int = 10,
+    seed: int = 0,
+) -> pl.DataFrame:
+    """Scores of each (number of curve types, number of groups) pair.
+
+    ``stability``: adjusted Rand index between the groups of all the data and
+    the groups refitted (another seed) on bootstrap samples where each
+    service's columns are drawn with replacement, i.e. other departure dates
+    of the same trains; mean and 10th percentile over ``n_boot`` samples.
+    ``silhouette``: on 3000 services, comparable only for the same number of
+    curve types. The chosen pair is the most stable one with at least 3
+    groups: 2 groups are always the most stable split (trains with many
+    seats or with few) and say little.
+    """
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import adjusted_rand_score, silhouette_score
+
+    rng = np.random.default_rng(seed)
+    owner, n = data["owner"], len(data["matrices"])
+    counts = np.bincount(owner, minlength=n)
+    starts = np.r_[0, np.cumsum(counts)[:-1]]  # columns are grouped by service
+    sample = rng.choice(n, min(3000, n), replace=False)
+    rows = []
+    for n_types in curve_types:
+        curve_type = fit_curve_types(data["curves"], n_types, seed).labels_
+        X = curve_histograms(owner, curve_type, n, n_types)
+        boots = []
+        for _ in range(n_boot):
+            pick = starts[owner] + (rng.random(len(owner)) * counts[owner]).astype(int)
+            boots.append(curve_histograms(owner, curve_type[pick], n, n_types))
+        for k in groups:
+            labels = KMeans(k, n_init=10, random_state=seed).fit(X).labels_
+            ari = [
+                adjusted_rand_score(labels, KMeans(k, n_init=3, random_state=seed + 1 + b).fit(Xb).labels_)
+                for b, Xb in enumerate(boots)
+            ]
+            rows.append(
+                {
+                    "curve_types": n_types,
+                    "groups": k,
+                    "stability": float(np.mean(ari)),
+                    "stability_p10": float(np.quantile(ari, 0.1)),
+                    "silhouette": float(silhouette_score(X[sample], labels[sample])),
+                }
+            )
+            print(rows[-1], flush=True)
+    return pl.DataFrame(rows)
+
+
+def fit_train_clusters(data: dict, curve_types: int, groups: int, seed: int = 0) -> dict:
+    """Groups of train services: k-means of their curve-type shares with the
+    Hellinger distance (see ``curve_histograms``). Groups are numbered by
+    size, largest first; ``distance`` is the Hellinger distance of each
+    service to its group's centre."""
+    import numpy as np
+    from sklearn.cluster import KMeans
+
+    codebook = fit_curve_types(data["curves"], curve_types, seed)
+    n = len(data["matrices"])
+    X = curve_histograms(data["owner"], codebook.labels_, n, curve_types)
+    model = KMeans(groups, n_init=20, random_state=seed).fit(X)
+    order = np.argsort(-np.bincount(model.labels_, minlength=groups), kind="stable")
+    relabel = np.empty(groups, dtype=int)
+    relabel[order] = np.arange(groups)
+    labels = relabel[model.labels_]
+    centers = model.cluster_centers_[order]
+    # Curve types ordered by their overall share of seats, for display
+    type_order = np.argsort(codebook.cluster_centers_.mean(axis=1))
+    return {
+        "labels": labels,
+        "distance": np.linalg.norm(X - centers[labels], axis=1) / np.sqrt(2),
+        "shares": (X**2)[:, type_order],  # (service, curve type)
+        "center_shares": np.clip(centers, 0, None)[:, type_order] ** 2,
+        "curve_types": codebook.cluster_centers_[type_order],  # (type, day)
+    }
+
+
+def train_cluster_page_data(data: dict, fit: dict, n_members: int = 30) -> dict:
+    """Groups of train services for the trip explorer page: for each group,
+    its mean matrix (share of its services proposed on a date that had a
+    seat, in %), its curve-type shares, a few facts, and the matrices of its
+    ``n_members`` most typical services, each packed as 2 bits per cell
+    (0: not listed, 1: no seat, 2: seat; cells in date-major order)."""
+    import base64
+    import numpy as np
+
+    services, matrices = data["services"], data["matrices"]
+    hours = np.array([t.hour + t.minute / 60 for t in services["heure_depart"].to_list()])
+    holiday_eves = set(holiday_peak_days())
+    peak_day = np.array([d.isoweekday() in (5, 7) or d in holiday_eves for d in data["dates"]])
+    afternoon = hours >= PEAK_FROM.hour
+
+    def pack(matrix) -> str:
+        values = (matrix.astype(np.int16) + 1).ravel()  # -1/0/1 -> 0/1/2
+        values = np.pad(values, (0, -len(values) % 4)).reshape(-1, 4)
+        packed = values[:, 0] | values[:, 1] << 2 | values[:, 2] << 4 | values[:, 3] << 6
+        return base64.b64encode(packed.astype(np.uint8).tobytes()).decode()
+
+    groups = []
+    for g in range(fit["labels"].max() + 1):
+        rows = np.flatnonzero(fit["labels"] == g)
+        member = matrices[rows]
+        seats = (member == 1).sum(axis=0)
+        listed = (member >= 0).sum(axis=0)
+        mean = np.where(listed > 0, np.round(100 * seats / np.maximum(listed, 1)), -1).astype(int)
+        typical = rows[np.argsort(fit["distance"][rows], kind="stable")[:n_members]]
+        trips = (
+            services[rows.tolist()]
+            .group_by("origine", "destination")
+            .len()
+            .sort("len", "origine", descending=[True, False])
+            .head(5)
+        )
+        groups.append(
+            {
+                "size": len(rows),
+                "seat_share": round(float((member == 1).sum() / (member >= 0).sum()), 4),
+                "median_hour": float(np.median(hours[rows])),
+                "peak_share": round(float((afternoon[rows][:, None] & peak_day[None, :] & (member >= 0).any(axis=2)).sum()
+                                          / (member >= 0).any(axis=2).sum()), 4),
+                "curve_shares": np.round(fit["center_shares"][g], 4).tolist(),
+                "mean": mean.ravel().tolist(),  # date-major, 31 days per date
+                "top_trips": [[o, d, n] for o, d, n in trips.iter_rows()],
+                "members": [
+                    {
+                        "origin": services["origine"][r],
+                        "destination": services["destination"][r],
+                        "time": f"{services['heure_depart'][r]:%H:%M}",
+                        "dates": int(data["observed"][r].sum()),
+                        "seat_share": round(float((matrices[r] == 1).sum() / (matrices[r] >= 0).sum()), 4),
+                        "distance": round(float(fit["distance"][r]), 3),
+                        "matrix": pack(matrices[r]),
+                    }
+                    for r in typical.tolist()
+                ],
+            }
+        )
+    return {
+        "dates": [f"{d:%Y-%m-%d}" for d in data["dates"]],
+        "min_dates": data["min_dates"],
+        "services": len(matrices),
+        "curve_types": np.round(fit["curve_types"], 3).tolist(),
+        "groups": groups,
+    }
+
+
+@app.command()
+def cluster_trains(
+    curve_types: int = typer.Option(TRAIN_CURVE_TYPES, help="Number of typical booking curves."),
+    groups: int = typer.Option(TRAIN_GROUPS, help="Number of groups of train services."),
+    min_dates: int = typer.Option(100, help="Keep services proposed on at least this many dates."),
+    seed: int = typer.Option(0, help="Random seed."),
+    choose: bool = typer.Option(
+        False, "--choose", help="Only print the scores of the hyperparameter grid (choose_train_clusters)."
+    ),
+):
+    """Cluster train services by their seat matrix (days before departure x
+    departure date, see ``service_matrices``), for departures since
+    ``SERVICES_FROM``.
+
+    Distance: each matrix is treated as a sample of booking curves (its
+    columns). The curves of all services are summarised by ``curve_types``
+    typical curves (k-means); a service is described by the share of its
+    columns of each type, and two services are compared with the Hellinger
+    distance between these shares. Groups are found with k-means on that
+    distance. Writes ``data/generated/train_clusters.csv`` (or
+    ``choose_train_clusters.csv`` with ``--choose``).
+    """
+    data = train_cluster_input(min_dates)
+    print(f"{len(data['matrices'])} services, {len(data['curves'])} booking curves")
+    if choose:
+        scores = choose_train_clusters(data, seed=seed)
+        scores.write_csv(generated_file("choose_train_clusters.csv"))
+        best = scores.filter(pl.col("groups") >= 3).sort("stability", "silhouette")[-1]
+        with pl.Config(tbl_rows=-1, float_precision=3):
+            print(scores)
+        print(f"Most stable with at least 3 groups: {best['curve_types'][0]} curve types, {best['groups'][0]} groups")
+        return
+
+    fit = fit_train_clusters(data, curve_types, groups, seed)
+    clusters = data["services"].with_columns(
+        group=pl.Series(fit["labels"] + 1),
+        distance=pl.Series(fit["distance"]).round(3),
+        dates=pl.Series(data["observed"].sum(axis=1)),
+    ).drop("row", "id")
+    clusters.sort("group", "distance").write_csv(generated_file("train_clusters.csv"))
+    page = train_cluster_page_data(data, fit, n_members=5)
+    for g, group in enumerate(page["groups"], start=1):
+        print(
+            f"\nGroup {g}: {group['size']} services, {group['seat_share']:.1%} of cells with a seat, "
+            f"median departure {int(group['median_hour'])}h{round(group['median_hour'] % 1 * 60):02d}, "
+            f"{group['peak_share']:.0%} of departures in peak periods"
+        )
+        print("  main trips:", "; ".join(f"{o} -> {d} ({n})" for o, d, n in group["top_trips"]))
+        top = sorted(range(curve_types), key=lambda i: -group["curve_shares"][i])[:4]
+        for i in top:
+            curve = page["curve_types"][i]
+            print(f"  {group['curve_shares'][i]:5.1%} curve type {i + 1}: seat probability J-29..J-0 "
+                  + "".join(" .:-=+*#%@"[min(9, int(p * 10))] for p in reversed(curve)))
+    print(f"\nWritten to {generated_file('train_clusters.csv')}")
 
 
 @app.command()
