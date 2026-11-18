@@ -1118,9 +1118,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
       $("train-title").textContent = serviceLabel(t);
       $("train-view-sub").textContent = "Matrice du train : proposé " + t.dates + " jours, place disponible dans " + pct.format(t.seat_share) +
         " des cases, écart au centre du groupe " + dec2.format(t.distance) + " (distance de Hellinger, de 0 à 1).";
-      $("train-legend").innerHTML = legendHTML([["c4", "Place MAXJEUNE disponible"], ["c1", "Pas de place"], ["nd", "Pas proposé ou pas de relevé"]]);
+      $("train-legend").innerHTML = legendHTML([["c4", "Place MAXJEUNE disponible"], ["c2", "Pas de place"], ["nd", "Pas proposé ou pas de relevé"]]);
       trainChart.draw({
-        cls: function (j, d) { var v = cell(j * 31 + d); return v === 1 ? "c4" : v === 0 ? "c1" : null; },
+        cls: function (j, d) { var v = cell(j * 31 + d); return v === 1 ? "c4" : v === 0 ? "c2" : null; },
         tip: function (j, d) { var v = cell(j * 31 + d); return [v === 1 ? "Place MAXJEUNE disponible" : v === 0 ? "Pas de place" : "Pas proposé ou pas de relevé"]; }
       });
     } else {

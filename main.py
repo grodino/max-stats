@@ -1708,7 +1708,9 @@ def service_matrices(first: date = SERVICES_FROM):
             .agg(seat=HAS_SEAT.any())
             .collect()
         )
-        new = cells.select(SERVICE).unique().join(services, on=SERVICE, how="anti")
+        # Sorted, so that service ids (and the clustering) do not depend on
+        # the order in which polars returns unique rows
+        new = cells.select(SERVICE).unique().join(services, on=SERVICE, how="anti").sort(SERVICE)
         if new.height:
             start = services.height
             services = pl.concat(
