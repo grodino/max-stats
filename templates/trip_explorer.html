@@ -135,7 +135,7 @@ input, select, button { font: inherit; color: var(--ink); }
 .member[aria-current="true"] { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); }
 .member-name { overflow-wrap: anywhere; }
 .member-meta { color: var(--muted); font-size: 0.8125rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
-#group-view { scroll-margin-top: 1rem; }
+#group-view, #train-view { scroll-margin-top: 1rem; }
 .group-view-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 0.5rem 1rem; }
 .view-actions { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
 .member.centre .member-name { font-weight: 600; }
@@ -163,6 +163,14 @@ input, select, button { font: inherit; color: var(--ink); }
 .series-dot { stroke: var(--bg); stroke-width: 1.5; }
 .series-dot.normal { fill: var(--r4); } .series-dot.peak { fill: var(--accent); }
 .rule { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+
+/* Train groups */
+.trains { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; border-top: 1px solid var(--line); padding-top: 2rem; }
+.curve-types { display: grid; gap: 0.5rem; }
+.curve-strip { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.curve { display: grid; justify-items: center; gap: 0.2rem; font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.curve svg { display: block; }
+.trips-line { margin: 0; color: var(--muted); }
 
 .method { display: grid; gap: 0.5rem; max-width: 42rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 1.25rem; }
 .method p { margin: 0; }
@@ -276,6 +284,44 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
       <div class="members" id="members">
         <div class="members-head"><span id="members-count">—</span><span>rang · écart</span></div>
         <ul class="member-list" id="member-list"></ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="trains" id="trains" aria-labelledby="trains-title">
+    <div class="chart-head">
+      <h2 id="trains-title">Groupes de trains</h2>
+      <p class="chart-sub" id="trains-sub"></p>
+    </div>
+    <div class="group-tabs" id="train-tabs" role="group" aria-label="Groupes de trains"></div>
+    <div class="group-panel">
+      <div class="chart-block" id="train-view">
+        <div class="group-view-head">
+          <div class="chart-head">
+            <h3 id="train-title">—</h3>
+            <p class="chart-sub" id="train-view-sub"></p>
+          </div>
+          <div class="view-actions">
+            <button class="link-button" id="train-reset" type="button" hidden>Revenir à la moyenne du groupe</button>
+          </div>
+        </div>
+        <div class="group-facts">
+          <div class="fact"><span class="fact-value" id="train-size">—</span><span class="fact-label">Trains dans le groupe</span></div>
+          <div class="fact"><span class="fact-value" id="train-seats">—</span><span class="fact-label">Cases avec une place</span></div>
+          <div class="fact"><span class="fact-value" id="train-hour">—</span><span class="fact-label">Heure de départ médiane</span></div>
+        </div>
+        <div class="legend" id="train-legend"></div>
+        <div class="chart" id="train-chart"></div>
+        <div class="curve-types" id="train-curve-types">
+          <h3>Courbes de réservation typiques du groupe</h3>
+          <p class="chart-sub">Chaque colonne d'une matrice est une courbe de réservation. Voici les courbes typiques les plus fréquentes dans le groupe (de J-29 en haut à J-0 en bas, plus foncé : place plus souvent disponible) et la part des colonnes du groupe qui leur ressemblent le plus.</p>
+          <div class="curve-strip" id="train-curves"></div>
+        </div>
+        <p class="trips-line" id="train-trips"></p>
+      </div>
+      <div class="members" id="train-members">
+        <div class="members-head"><span id="train-members-count">—</span><span>dates · places</span></div>
+        <ul class="member-list" id="train-member-list"></ul>
       </div>
     </div>
   </section>
@@ -906,6 +952,222 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     ] });
   }
   renderHub();
+
+  /* Train groups: seat matrices (days before departure x departure dates) of train services */
+  var TR = DATA.trains;
+  var trDates = TR.dates.map(function (s) { return new Date(s + "T00:00:00"); });
+  var MEAN_THRESHOLDS = [5, 20, 40, 60, 80];
+  var dayShort = new Intl.DateTimeFormat("fr-FR", { weekday: "short", day: "numeric", month: "long", year: "numeric" });
+
+  function unpack(b64) {
+    var bin = atob(b64), bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return function (i) { return ((bytes[i >> 2] >> ((i & 3) * 2)) & 3) - 1; }; // -1, 0 or 1
+  }
+  function hourLabel(h) { return Math.floor(h) + " h " + String(Math.round((h % 1) * 60)).padStart(2, "0"); }
+  function serviceLabel(m) { return pretty(m.origin) + " → " + pretty(m.destination) + " · " + m.time; }
+
+  /* Heatmap of a matrix with days before departure as rows and dates as columns.
+     spec = { cls: function (dateIndex, day) -> class or null, tip: function (dateIndex, day) -> [lines] } */
+  function MatrixChart(container, label) {
+    this.container = container;
+    this.svg = document.createElementNS(SVG_NS, "svg");
+    this.svg.setAttribute("role", "img");
+    this.svg.setAttribute("aria-label", label);
+    this.tip = document.createElement("div");
+    this.tip.className = "tooltip";
+    this.tip.hidden = true;
+    container.appendChild(this.svg);
+    container.appendChild(this.tip);
+    var self = this, lastWidth = 0;
+    this.svg.addEventListener("pointermove", function (e) { self.showTip(e); });
+    this.svg.addEventListener("pointerdown", function (e) { self.showTip(e); });
+    this.svg.addEventListener("pointerleave", function (e) { if (e.pointerType === "mouse") self.hideTip(); });
+    if (window.ResizeObserver) {
+      new ResizeObserver(function () {
+        var w = container.clientWidth;
+        if (w !== lastWidth) { lastWidth = w; if (self.spec) self.draw(self.spec); }
+      }).observe(container);
+    }
+  }
+
+  MatrixChart.prototype.draw = function (spec) {
+    this.spec = spec;
+    var width = Math.max(this.container.clientWidth, 260);
+    var m = { t: 8, r: 8, b: 40, l: 40 };
+    var n = trDates.length, cw = (width - m.l - m.r) / n, ch = width < 560 ? 8 : 10;
+    var height = m.t + 31 * ch + m.b;
+    this.geom = { m: m, cw: cw, ch: ch };
+    function y(d) { return m.t + (30 - d) * ch; }
+    var out = ['<rect class="nd" x="' + m.l + '" y="' + m.t + '" width="' + (cw * n).toFixed(2) + '" height="' + (31 * ch) + '"></rect>'];
+    // One rect per run of equal cells in a column
+    for (var j = 0; j < n; j++) {
+      var x = (m.l + j * cw).toFixed(2), w = (cw + 0.3).toFixed(2), run = null, top = 0;
+      for (var d = 30; d >= -1; d--) {
+        var c = d >= 0 ? spec.cls(j, d) : undefined;
+        if (c !== run) {
+          if (run) out.push('<rect class="' + run + '" x="' + x + '" y="' + y(top) + '" width="' + w + '" height="' + ((top - d) * ch + 0.3) + '"></rect>');
+          run = c; top = d;
+        }
+      }
+    }
+    out.push('<path class="domain" d="M' + m.l + ',' + m.t + 'V' + (m.t + 31 * ch) + 'H' + (m.l + cw * n) + '"></path>');
+    for (var t = 0; t <= 30; t += 5) {
+      out.push('<text class="tick" x="' + (m.l - 6) + '" y="' + (y(t) + ch / 2) + '" dy="0.35em" text-anchor="end">' + t + '</text>');
+    }
+    out.push('<text class="axis-title" transform="translate(11,' + (m.t + 15.5 * ch) + ') rotate(-90)" text-anchor="middle">Jours avant le départ</text>');
+    var every = width < 560 ? 2 : 1;
+    trDates.forEach(function (date, j) {
+      if (date.getDate() !== 1 || date.getMonth() % every !== 0) return;
+      var xx = m.l + j * cw;
+      out.push('<line class="domain" x1="' + xx.toFixed(1) + '" x2="' + xx.toFixed(1) + '" y1="' + (m.t + 31 * ch) + '" y2="' + (m.t + 31 * ch + 4) + '"></line>');
+      out.push('<text class="tick" x="' + (xx + 2).toFixed(1) + '" y="' + (m.t + 31 * ch + 16) + '">' + monthShort.format(date) + '</text>');
+    });
+    out.push('<text class="axis-title" x="' + (m.l + cw * n / 2) + '" y="' + (height - 4) + '" text-anchor="middle">Date de départ</text>');
+    out.push('<rect class="hover" width="0" height="0" visibility="hidden"></rect>');
+    this.svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+    this.svg.setAttribute("width", width);
+    this.svg.setAttribute("height", height);
+    this.svg.innerHTML = out.join("");
+    this.hover = this.svg.lastChild;
+    this.hideTip();
+  };
+  MatrixChart.prototype.hideTip = Heatmap.prototype.hideTip;
+  MatrixChart.prototype.showTip = function (evt) {
+    if (!this.spec || !this.geom) return;
+    var box = this.svg.getBoundingClientRect(), scale = box.width / Number(this.svg.getAttribute("width"));
+    var g = this.geom, px = (evt.clientX - box.left) / scale, py = (evt.clientY - box.top) / scale;
+    var j = Math.floor((px - g.m.l) / g.cw), row = Math.floor((py - g.m.t) / g.ch);
+    if (j < 0 || j >= trDates.length || row < 0 || row > 30) { this.hideTip(); return; }
+    var d = 30 - row;
+    this.hover.setAttribute("x", g.m.l + j * g.cw);
+    this.hover.setAttribute("y", g.m.t + row * g.ch);
+    this.hover.setAttribute("width", Math.max(g.cw, 2));
+    this.hover.setAttribute("height", g.ch);
+    this.hover.setAttribute("visibility", "visible");
+    var tip = this.tip;
+    tip.textContent = "";
+    var head = document.createElement("strong");
+    head.textContent = dayShort.format(trDates[j]) + " · " + dayLabel(d);
+    tip.appendChild(head);
+    this.spec.tip(j, d).forEach(function (l) { var s = document.createElement("span"); s.textContent = l; tip.appendChild(s); });
+    tip.hidden = false;
+    var cbox = this.container.getBoundingClientRect();
+    var tx = evt.clientX - cbox.left + 14, ty = evt.clientY - cbox.top + 14;
+    if (tx + tip.offsetWidth > cbox.width) tx = evt.clientX - cbox.left - tip.offsetWidth - 14;
+    if (tx < 0) tx = 0;
+    tip.style.left = tx + "px";
+    tip.style.top = ty + "px";
+  };
+
+  var trainChart = new MatrixChart($("train-chart"), "Matrice de places : jours avant le départ en lignes, dates de départ en colonnes");
+  var trainTabs = $("train-tabs");
+  var currentTrainGroup = 0, currentTrain = null;
+  $("trains-sub").textContent = "Un train est un départ régulier : une origine, une destination et une heure de départ. Sa matrice a une ligne par " +
+    "nombre de jours avant le départ et une colonne par date où il a été proposé ; une case vaut 1 s'il restait une place MAXJEUNE ce jour-là " +
+    "(trains couplés et voitures réunis). Les " + nf.format(TR.services) + " trains proposés au moins " + TR.min_dates +
+    " jours depuis mars 2026 sont regroupés. Chaque matrice est vue comme un échantillon de courbes de réservation (ses colonnes), " +
+    "résumées par " + TR.curve_types.length + " courbes typiques ; deux trains sont proches quand leurs colonnes se répartissent de la même façon " +
+    "entre ces courbes (distance de Hellinger), quelles que soient les dates où ils circulent. Le nombre de courbes et de groupes est la " +
+    "combinaison la plus stable (au moins 3 groupes) quand on rééchantillonne les dates de chaque train.";
+
+  TR.groups.forEach(function (g, i) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "group-tab";
+    b.id = "train-tab-" + i;
+    b.setAttribute("aria-pressed", "false");
+    b.textContent = groupName(i) + " ";
+    var count = document.createElement("span");
+    count.className = "count";
+    count.textContent = "· " + nf.format(g.size) + " trains";
+    b.appendChild(count);
+    b.addEventListener("click", function () { currentTrainGroup = i; currentTrain = null; renderTrains(); });
+    trainTabs.appendChild(b);
+  });
+  $("train-reset").addEventListener("click", function () { currentTrain = null; renderTrains(); });
+
+  function legendHTML(items) {
+    return items.map(function (it) {
+      return '<span class="legend-item"><svg width="14" height="10" aria-hidden="true"><rect class="' + it[0] + '" width="14" height="10"></rect></svg>' + it[1] + '</span>';
+    }).join("");
+  }
+
+  function curveSVG(curve) {
+    var cell = 4, out = ['<svg width="14" height="' + (curve.length * cell) + '" aria-hidden="true">'];
+    for (var d = curve.length - 1; d >= 0; d--) {
+      var p = curve[d], cls = "c" + Math.min(5, Math.floor(p * 6));
+      out.push('<rect class="' + cls + '" x="0" y="' + ((curve.length - 1 - d) * cell) + '" width="14" height="' + cell + '"></rect>');
+    }
+    return out.join("") + '</svg>';
+  }
+
+  function renderTrains() {
+    var g = TR.groups[currentTrainGroup], t = currentTrain;
+    Array.prototype.forEach.call(trainTabs.children, function (b, i) { b.setAttribute("aria-pressed", String(i === currentTrainGroup)); });
+    $("train-reset").hidden = !t;
+    $("train-size").textContent = nf.format(g.size);
+    $("train-seats").textContent = pct.format(g.seat_share);
+    $("train-hour").textContent = hourLabel(g.median_hour);
+    $("train-trips").textContent = "Trajets les plus fréquents du groupe : " + g.top_trips.map(function (x) {
+      return pretty(x[0]) + " → " + pretty(x[1]) + " (" + x[2] + " trains)";
+    }).join(" ; ") + ".";
+
+    if (t) {
+      var cell = unpack(t.matrix);
+      $("train-title").textContent = serviceLabel(t);
+      $("train-view-sub").textContent = "Matrice du train : proposé " + t.dates + " jours, place disponible dans " + pct.format(t.seat_share) +
+        " des cases, écart au centre du groupe " + dec2.format(t.distance) + " (distance de Hellinger, de 0 à 1).";
+      $("train-legend").innerHTML = legendHTML([["c4", "Place MAXJEUNE disponible"], ["c1", "Pas de place"], ["nd", "Pas proposé ou pas de relevé"]]);
+      trainChart.draw({
+        cls: function (j, d) { var v = cell(j * 31 + d); return v === 1 ? "c4" : v === 0 ? "c1" : null; },
+        tip: function (j, d) { var v = cell(j * 31 + d); return [v === 1 ? "Place MAXJEUNE disponible" : v === 0 ? "Pas de place" : "Pas proposé ou pas de relevé"]; }
+      });
+    } else {
+      $("train-title").textContent = groupName(currentTrainGroup) + " : moyenne de " + nf.format(g.size) + " trains";
+      $("train-view-sub").textContent = "Ce n'est pas un vrai train : chaque case donne la part des trains du groupe proposés ce jour-là qui avaient encore une place MAXJEUNE. Choisissez un train dans la liste pour voir sa matrice.";
+      $("train-legend").innerHTML = legendHTML([["c0", "< 5 %"], ["c1", "5 %"], ["c2", "20 %"], ["c3", "40 %"], ["c4", "60 %"], ["c5", "80 %+"], ["nd", "Aucun train proposé"]]);
+      trainChart.draw({
+        cls: function (j, d) {
+          var v = g.mean[j * 31 + d];
+          if (v < 0) return null;
+          var i = 0;
+          while (i < MEAN_THRESHOLDS.length && v >= MEAN_THRESHOLDS[i]) i++;
+          return "c" + i;
+        },
+        tip: function (j, d) { var v = g.mean[j * 31 + d]; return [v < 0 ? "Aucun train du groupe proposé" : v + " % des trains du groupe proposés avaient une place"]; }
+      });
+    }
+
+    var order = g.curve_shares.map(function (_, i) { return i; }).sort(function (a, b) { return g.curve_shares[b] - g.curve_shares[a]; }).slice(0, 8);
+    var strip = $("train-curves");
+    strip.textContent = "";
+    order.forEach(function (i) {
+      var item = document.createElement("div");
+      item.className = "curve";
+      item.innerHTML = curveSVG(TR.curve_types[i]);
+      var label = document.createElement("span");
+      label.textContent = pct.format(g.curve_shares[i]);
+      item.appendChild(label);
+      item.title = "Courbe typique " + (i + 1) + " : " + pct1.format(g.curve_shares[i]) + " des colonnes du groupe";
+      strip.appendChild(item);
+    });
+
+    $("train-members-count").textContent = g.members.length + " trains les plus typiques sur " + nf.format(g.size);
+    var list = $("train-member-list");
+    list.textContent = "";
+    list.appendChild(memberButton("Moyenne du groupe", "train fictif", t === null,
+      function () { currentTrain = null; renderTrains(); }, "centre"));
+    g.members.forEach(function (m) {
+      list.appendChild(memberButton(serviceLabel(m), m.dates + " j · " + pct.format(m.seat_share), m === t, function () {
+        currentTrain = m;
+        renderTrains();
+        var top = $("train-view").getBoundingClientRect().top;
+        if (top < 0) $("train-view").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+      }));
+    });
+  }
+  renderTrains();
 
   // Start on the remembered trip, or the trip with the most seats
   fillSelect("");
